@@ -1,0 +1,166 @@
+# In ppt_utils.py (ensure these imports are at the top of the file)
+import copy
+from io import BytesIO as IOBytes
+from lxml import etree
+import pandas as pd
+import numpy as np
+from openpyxl import load_workbook
+from itertools import islice
+from random import randrange # For your original ID generation, though consider if needed
+
+from pptx.chart.data import CategoryChartData
+from pptx.opc.constants import CONTENT_TYPE as CT, RELATIONSHIP_TYPE as RT
+from pptx.opc.package import XmlPart
+from pptx.oxml import parse_xml
+# (Other necessary imports for ppt_utils.py like PackURI, SlidePart, etc. should already be there)
+
+# --- Helper classes for chart style parts (as you provided) ---
+class ColorsPart(XmlPart):
+    partname_template = "/ppt/charts/colors%d.xml" # e.g. /ppt/charts/colors1.xml
+    @classmethod
+    def new(cls, package, element_xml_str): # element_xml_str should be bytes
+        part = cls.load(
+            package.next_partname(cls.partname_template),
+            CT.OFC_CHART_COLORS, # Office Open XML Chart Colors part
+            package,
+            element_xml_str, # Pass bytes directly to load
+        )
+        return part
+
+class StylePart(XmlPart):
+    partname_template = "/ppt/charts/style%d.xml" # e.g. /ppt/charts/style1.xml
+    @classmethod
+    def new(cls, package, element_xml_str): # element_xml_str should be bytes
+        part = cls.load(
+            package.next_partname(cls.partname_template),
+            CT.OFC_CHART_STYLE, # Office Open XML Chart Style part
+            package,
+            element_xml_str, # Pass bytes directly to load
+        )
+        return part
+
+# --- Chart data utilities (chart_to_dataframe, dataframe_to_chart_data) ---
+# (Keep your existing robust versions of chart_to_dataframe and dataframe_to_chart_data here)
+# For brevity, I'm not repeating them if they are already in your ppt_utils.py
+# Make sure they are defined before clone_chart if they aren't already.
+
+# --- Updated clone_chart function ---
+def clone_chart(source_graphic_frame, dest_shapes_collection):
+    """
+    Clones a chart with related styling. Attempts to duplicate main chart XML,
+    data, and related style/color parts.
+    :param source_graphic_frame: GraphicFrame shape object of the chart to copy.
+    :param dest_shapes_collection: Shapes collection to add the new chart to (e.g., slide.shapes).
+    :return: The new chart's GraphicFrame object.
+    """
+    source_chart = source_graphic_frame.chart
+    
+    # 1. Extract data from source chart
+    try:
+        df = chart_to_dataframe(source_graphic_frame)
+        chart_data_for_new_chart = dataframe_to_chart_data(df)
+    except Exception as e:
+        print(f"Warning: Could not extract/process data from source chart '{getattr(source_graphic_frame, 'name', 'Unnamed')}': {e}. Creating new chart with placeholder data.")
+        chart_data_for_new_chart = CategoryChartData()
+        chart_data_for_new_chart.categories = ["Category 1"]
+        chart_data_for_new_chart.add_series("Series 1", (0,))
+
+    # 2. Add a new chart of the same type, position, size, with the original data
+    new_chart_graphic_frame = dest_shapes_collection.add_chart(
+        source_chart.chart_type,
+        source_graphic_frame.left,
+        source_graphic_frame.top,
+        source_graphic_frame.width,
+        source_graphic_frame.height,
+        chart_data_for_new_chart,
+    )
+
+    # 3. Attempt to clone detailed styling via XML manipulation
+    try:
+        id_attribute = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+        
+        # Get XML parts for both old and new charts
+        old_chart_graphic_data_el_list = source_graphic_frame.element.xpath(".//a:graphicData/c:chart", namespaces={'a': 'http://schemas.openxmlformats.org/drawingml/2006/main', 'c': 'http://schemas.openxmlformats.org/drawingml/2006/chart'})
+        if not old_chart_graphic_data_el_list: raise ValueError("Source chart XML structure (graphicData/chart) not found.")
+        old_chart_rId = old_chart_graphic_data_el_list[0].get(id_attribute)
+        if not old_chart_rId or old_chart_rId not in source_graphic_frame.part.rels: raise ValueError(f"Source chart rId '{old_chart_rId}' not found in source graphic frame's relationships.")
+        old_chart_part = source_graphic_frame.part.rels[old_chart_rId].target_part # This is the ChartPart of the source
+
+        new_chart_graphic_data_el_list = new_chart_graphic_frame.element.xpath(".//a:graphicData/c:chart", namespaces={'a': 'http://schemas.openxmlformats.org/drawingml/2006/main', 'c': 'http://schemas.openxmlformats.org/drawingml/2006/chart'})
+        if not new_chart_graphic_data_el_list: raise ValueError("New chart XML structure (graphicData/chart) not found.")
+        new_chart_rId = new_chart_graphic_data_el_list[0].get(id_attribute)
+        if not new_chart_rId or new_chart_rId not in new_chart_graphic_frame.part.rels: raise ValueError(f"New chart rId '{new_chart_rId}' not found in new graphic frame's relationships.")
+        new_chart_part_obj = new_chart_graphic_frame.part.rels[new_chart_rId].target_part # This is the ChartPart of the new chart
+
+        # Clone the main chart XML content (c:chartSpace)
+        cloned_chart_element_xml = copy.deepcopy(old_chart_part.element)
+
+        # Preserve the new chart's existing externalData rId (points to its own new Excel package)
+        new_chart_external_data_el_list = new_chart_part_obj.element.xpath(".//c:externalData", namespaces={'c': 'http://schemas.openxmlformats.org/drawingml/2006/chart'})
+        if new_chart_external_data_el_list:
+            new_external_data_rId = new_chart_external_data_el_list[0].get(id_attribute)
+            cloned_external_data_el_list = cloned_chart_element_xml.xpath(".//c:externalData", namespaces={'c': 'http://schemas.openxmlformats.org/drawingml/2006/chart'})
+            if cloned_external_data_el_list:
+                cloned_external_data_el_list[0].set(id_attribute, new_external_data_rId)
+        
+        # Ensure autoUpdate is set (important for the chart to reflect data changes)
+        auto_update_list = cloned_chart_element_xml.xpath(".//c:autoUpdate", namespaces={'c': 'http://schemas.openxmlformats.org/drawingml/2006/chart'})
+        if auto_update_list:
+             auto_update_list[0].set("val", "1")
+        else:
+            # Find a suitable place to insert autoUpdate, e.g., as a child of chartSpace, before plotArea
+            chart_space_root = cloned_chart_element_xml
+            auto_update_el = etree.Element("{http://schemas.openxmlformats.org/drawingml/2006/chart}autoUpdate")
+            auto_update_el.set("val", "1")
+            # Insert it - typically after title, before plotArea
+            plot_area_el = chart_space_root.find("c:plotArea", namespaces={'c': 'http://schemas.openxmlformats.org/drawingml/2006/chart'})
+            if plot_area_el is not None:
+                plot_area_el.addprevious(auto_update_el)
+            else: # Fallback, append to root if plotArea not found (less ideal)
+                chart_space_root.append(auto_update_el)
+        
+        # Replace new chart's XML with the styled one (with corrected externalData link)
+        new_chart_part_obj.element = cloned_chart_element_xml
+
+        # --- Clone style and color relationships and their target parts ---
+        package = new_chart_part_obj.package # Main OpcPackage
+
+        for rel in _object_rels(old_chart_part): # Iterate relationships of the OLD chart part
+            # Check for Chart Colors relationship
+            if rel.reltype == RT.CHART_COLORS: # "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartColors"
+                source_colors_part = rel.target_part
+                # Create a new blob for the new colors part by deepcopying the old one
+                new_colors_blob = copy.deepcopy(source_colors_part.blob)
+                # Create a new ColorsPart in the package
+                new_colors_part_ref = ColorsPart.new(package, new_colors_blob)
+                # Add a relationship from the NEW chart part to this new ColorsPart
+                new_chart_part_obj.relate_to(new_colors_part_ref, RT.CHART_COLORS)
+            
+            # Check for Chart Style relationship
+            # The exact reltype string can vary. python-pptx RT.CHART_STYLE is usually for user shapes.
+            # Common ones found in chart#.xml.rels are:
+            # "http://schemas.microsoft.com/office/2007/06/relationships/chartstyle" (older)
+            # "http://schemas.microsoft.com/office/2011/relationships/chartStyle" (newer)
+            # You might need to inspect your template's chart#.xml.rels to confirm the exact type string.
+            elif rel.reltype == "http://schemas.microsoft.com/office/2011/relationships/chartStyle" or \
+                 rel.reltype == "http://schemas.microsoft.com/office/2007/06/relationships/chartstyle":
+                source_style_part = rel.target_part
+                new_style_blob = copy.deepcopy(source_style_part.blob)
+                # The new() method of your StylePart class will create a new part with a unique name
+                new_style_part_ref = StylePart.new(package, new_style_blob)
+                # Add relationship from NEW chart part to new StylePart, using the original reltype
+                new_chart_part_obj.relate_to(new_style_part_ref, rel.reltype)
+
+        # The random ID setting on new_el for style/color parts might not be necessary
+        # as new parts get unique names. Let's rely on part duplication and re-linking.
+
+    except Exception as e:
+        # Using st.write for errors if in Streamlit context, otherwise print
+        try:
+            import streamlit as st_clone_chart # Try to import for st.warning
+            st_clone_chart.warning(f"Could not fully clone chart style elements for '{getattr(source_graphic_frame, 'name', 'Unnamed')}': {e}. Some styling might revert to default.")
+        except ImportError:
+            print(f"Warning: Could not fully clone chart style elements for '{getattr(source_graphic_frame, 'name', 'Unnamed')}': {e}. Some styling might revert to default.")
+        # Allow the basic chart (with data) to be returned even if deep style cloning fails partially
+    
+    return new_chart_graphic_frame
