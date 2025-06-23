@@ -1,0 +1,356 @@
+import streamlit as st
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.shapes import MSO_SHAPE
+import xml.etree.ElementTree as ET
+import zipfile
+import os
+import tempfile
+import shutil
+
+# Helper function to extract asset classes and vintages from V_df
+def extract_asset_classes_and_vintages_from_df(V_df_data):
+    """
+    Extract unique asset classes and vintage range from V_df
+    """
+    if V_df_data is None or V_df_data.empty:
+        return [], []
+    
+    # Get unique asset classes
+    unique_asset_classes = sorted(V_df_data['asset_class'].unique().tolist())
+    
+    # Get vintage range
+    all_vintages = V_df_data['vintage'].unique()
+    min_vintage = int(min(all_vintages))
+    max_vintage = int(max(all_vintages))
+    
+    # Calculate appropriate interval for 4-5 legend items
+    vintage_range = max_vintage - min_vintage
+    if vintage_range <= 4:
+        interval = 1
+    elif vintage_range <= 8:
+        interval = 2
+    elif vintage_range <= 12:
+        interval = 3
+    elif vintage_range <= 16:
+        interval = 4
+    else:
+        interval = max(4, vintage_range // 4)  # Aim for ~4 items in legend
+    
+    # Generate vintage legend values
+    # Start from nearest multiple of interval below min_vintage
+    start_vintage = (min_vintage // interval) * interval
+    if start_vintage > min_vintage:
+        start_vintage -= interval
+    
+    # End at nearest multiple of interval above max_vintage
+    end_vintage = ((max_vintage // interval) + 1) * interval
+    if end_vintage < max_vintage:
+        end_vintage += interval
+    
+    vintage_legend_values = []
+    current = start_vintage
+    while current <= end_vintage:
+        vintage_legend_values.append(current)
+        current += interval
+    
+    # Limit to 5 items max for space
+    if len(vintage_legend_values) > 5:
+        # Take evenly spaced values
+        step = len(vintage_legend_values) // 4
+        vintage_legend_values = [vintage_legend_values[i] for i in range(0, len(vintage_legend_values), step)][:5]
+    
+    return unique_asset_classes, vintage_legend_values
+
+
+# Option 1: Add a text box with custom legend (RECOMMENDED - Most reliable)
+def add_custom_legend_textbox(slide, V_df_data, position_x=Inches(7), position_y=Inches(2)):
+    """
+    Add a custom legend as a text box that mimics the double legend style
+    Dynamically extracts asset classes and vintages from V_df
+    """
+    # Extract asset classes and vintages from V_df
+    asset_classes, vintage_values = extract_asset_classes_and_vintages_from_df(V_df_data)
+    
+    if not asset_classes:
+        return None
+    
+    # Calculate dimensions
+    box_width = Inches(2.5)
+    # Dynamic height based on content
+    estimated_height = Inches(0.5 + (len(asset_classes) * 0.2) + 0.3 + (len(vintage_values) * 0.2) + 0.3)
+    
+    # Create the text box
+    textbox = slide.shapes.add_textbox(
+        left=position_x,
+        top=position_y,
+        width=box_width,
+        height=estimated_height
+    )
+    
+    text_frame = textbox.text_frame
+    text_frame.clear()  # Clear any existing text
+    text_frame.margin_left = Pt(5)
+    text_frame.margin_right = Pt(5)
+    text_frame.margin_top = Pt(5)
+    text_frame.margin_bottom = Pt(5)
+    
+    # Add "Asset Class" header
+    p = text_frame.add_paragraph()
+    p.text = "Asset Class"
+    p.font.bold = True
+    p.font.size = Pt(12)
+    
+    # Map asset classes to colors (using same order as in PPT_EXTENDED_RGB_COLORS)
+    color_index = 0
+    for asset_class in asset_classes:
+        p = text_frame.add_paragraph()
+        p.space_before = Pt(3)
+        
+        # Get color from extended palette
+        color = PPT_EXTENDED_RGB_COLORS[color_index % len(PPT_EXTENDED_RGB_COLORS)]
+        color_index += 1
+        
+        # Add colored rectangle character
+        run = p.add_run()
+        run.text = "■ "  # Unicode square character
+        run.font.color.rgb = color
+        run.font.size = Pt(14)
+        
+        # Add asset class name
+        run = p.add_run()
+        run.text = asset_class
+        run.font.size = Pt(10)
+    
+    # Add spacing
+    p = text_frame.add_paragraph()
+    p.text = " "
+    
+    # Add "Vintage" header
+    p = text_frame.add_paragraph()
+    p.text = "Vintage"
+    p.font.bold = True
+    p.font.size = Pt(12)
+    
+    # Calculate shading for vintages
+    if vintage_values:
+        min_val = min(vintage_values)
+        max_val = max(vintage_values)
+        range_val = max_val - min_val if max_val != min_val else 1
+        
+        for vintage in vintage_values:
+            p = text_frame.add_paragraph()
+            p.space_before = Pt(3)
+            
+            # Calculate shade factor (0.3 to 1.0, darker for negative)
+            if range_val > 0:
+                normalized = (vintage - min_val) / range_val  # 0 to 1
+                factor = 0.3 + (normalized * 0.7)  # 0.3 to 1.0
+            else:
+                factor = 0.65  # Middle shade if all same
+            
+            gray_value = int(128 * factor)
+            shade_color = RGBColor(gray_value, gray_value, gray_value)
+            
+            # Add colored rectangle
+            run = p.add_run()
+            run.text = "■ "
+            run.font.color.rgb = shade_color
+            run.font.size = Pt(14)
+            
+            # Add vintage value
+            run = p.add_run()
+            run.text = str(vintage)
+            run.font.size = Pt(10)
+    
+    # Add border to the textbox
+    line = textbox.line
+    line.color.rgb = RGBColor(200, 200, 200)
+    line.width = Pt(0.75)
+    
+    return textbox
+
+
+# Option 2: Create visual legend using shapes (More complex but more visual)
+def add_visual_legend_shapes(slide, V_df_data, position_x=Inches(7), position_y=Inches(2)):
+    """
+    Create a legend using shapes for a more visual representation
+    Dynamically extracts asset classes and vintages from V_df
+    """
+    # Extract asset classes and vintages from V_df
+    asset_classes, vintage_values = extract_asset_classes_and_vintages_from_df(V_df_data)
+    
+    if not asset_classes:
+        return None
+    
+    # Asset Class section
+    y_offset = position_y
+    
+    # Add "Asset Class" label
+    textbox = slide.shapes.add_textbox(position_x, y_offset, Inches(2), Inches(0.3))
+    textbox.text_frame.text = "Asset Class"
+    textbox.text_frame.paragraphs[0].font.bold = True
+    textbox.text_frame.paragraphs[0].font.size = Pt(12)
+    
+    y_offset += Inches(0.35)
+    
+    # Add asset classes with colors
+    color_index = 0
+    for asset_class in asset_classes:
+        color = PPT_EXTENDED_RGB_COLORS[color_index % len(PPT_EXTENDED_RGB_COLORS)]
+        color_index += 1
+        
+        # Add color rectangle
+        rect = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            position_x, y_offset,
+            Inches(0.2), Inches(0.15)
+        )
+        rect.fill.solid()
+        rect.fill.fore_color.rgb = color
+        rect.line.color.rgb = RGBColor(200, 200, 200)
+        rect.line.width = Pt(0.5)
+        
+        # Add text
+        textbox = slide.shapes.add_textbox(
+            position_x + Inches(0.25), y_offset,
+            Inches(2), Inches(0.2)
+        )
+        textbox.text_frame.text = asset_class
+        textbox.text_frame.paragraphs[0].font.size = Pt(10)
+        
+        y_offset += Inches(0.2)
+    
+    # Add spacing
+    y_offset += Inches(0.2)
+    
+    # Add "Vintage" label
+    textbox = slide.shapes.add_textbox(position_x, y_offset, Inches(2), Inches(0.3))
+    textbox.text_frame.text = "Vintage"
+    textbox.text_frame.paragraphs[0].font.bold = True
+    textbox.text_frame.paragraphs[0].font.size = Pt(12)
+    
+    y_offset += Inches(0.35)
+    
+    # Add vintage shades
+    if vintage_values:
+        min_val = min(vintage_values)
+        max_val = max(vintage_values)
+        range_val = max_val - min_val if max_val != min_val else 1
+        
+        for vintage in vintage_values:
+            # Calculate shade factor
+            if range_val > 0:
+                normalized = (vintage - min_val) / range_val
+                factor = 0.3 + (normalized * 0.7)
+            else:
+                factor = 0.65
+            
+            gray_value = int(128 * factor)
+            color = RGBColor(gray_value, gray_value, gray_value)
+            
+            # Add color rectangle
+            rect = slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE,
+                position_x, y_offset,
+                Inches(0.2), Inches(0.15)
+            )
+            rect.fill.solid()
+            rect.fill.fore_color.rgb = color
+            rect.line.color.rgb = RGBColor(200, 200, 200)
+            rect.line.width = Pt(0.5)
+            
+            # Add text
+            textbox = slide.shapes.add_textbox(
+                position_x + Inches(0.25), y_offset,
+                Inches(2), Inches(0.2)
+            )
+            textbox.text_frame.text = str(vintage)
+            textbox.text_frame.paragraphs[0].font.size = Pt(10)
+            
+            y_offset += Inches(0.2)
+
+
+# Option 3: Analyze XML structure (for understanding/debugging)
+def analyze_chart_xml_structure(pptx_path, chart_name):
+    """
+    Extract and analyze the XML structure of a specific chart
+    """
+    temp_dir = tempfile.mkdtemp()
+    
+    try:
+        # Extract PPTX
+        with zipfile.ZipFile(pptx_path, 'r') as zip_ref:
+            zip_ref.extractall(temp_dir)
+        
+        # Find charts in slides
+        slide_dir = os.path.join(temp_dir, 'ppt', 'slides')
+        chart_info = []
+        
+        for slide_file in os.listdir(slide_dir):
+            if slide_file.endswith('.xml'):
+                slide_path = os.path.join(slide_dir, slide_file)
+                
+                with open(slide_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    
+                if chart_name in content:
+                    # Parse XML
+                    tree = ET.parse(slide_path)
+                    root = tree.getroot()
+                    
+                    # Find chart relationships
+                    for elem in root.iter():
+                        if 'chart' in elem.tag.lower():
+                            chart_info.append({
+                                'slide': slide_file,
+                                'element': elem.tag,
+                                'attributes': elem.attrib
+                            })
+        
+        return chart_info
+        
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+# Integration function to add legends after chart updates
+def add_double_legends_to_slides(presentation, V_df_data, charts_with_legends):
+    """
+    Add double legends to specific slides after charts have been updated
+    
+    Args:
+        presentation: The PowerPoint presentation object
+        V_df_data: The V_df dataframe containing asset classes and vintages
+        charts_with_legends: List of tuples (slide_index, chart_name, position)
+    """
+    for slide_idx, chart_name, (pos_x, pos_y) in charts_with_legends:
+        slide = presentation.slides[slide_idx]
+        
+        # Use the text box approach (most reliable)
+        add_custom_legend_textbox(slide, V_df_data, pos_x, pos_y)
+
+
+# Example usage in your export function:
+def export_cashflow_charts_to_ppt_with_legends(template_path, output_path, V_df_data, **kwargs):
+    """
+    Modified export function that adds double legends
+    """
+    # Your existing export code here...
+    # After updating charts, add legends
+    
+    prs = Presentation(output_path)  # Re-open the saved presentation
+    
+    # Define which charts need double legends and their positions
+    charts_needing_legends = [
+        (2, "cht_sub_alloc_pm", (Inches(7), Inches(2))),     # Slide 3, adjust position as needed
+        (3, "cht_nav_forecast", (Inches(7), Inches(2)))      # Slide 4, adjust position as needed
+    ]
+    
+    add_double_legends_to_slides(prs, V_df_data, charts_needing_legends)
+    
+    prs.save(output_path)
+    
+    return True
