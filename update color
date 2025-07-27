@@ -1,26 +1,23 @@
 data = merged_df.copy()
 
-# heatmap with conditional formatting
 num_rows = data.shape[0]
 fig_height = max(8, num_rows * 0.5)
 
 fig, ax = plt.subplots(figsize=(12, fig_height))
 
-# Create a matrix to hold the color values (normalized 0-1 for cmap)
 color_matrix = pd.DataFrame(index=data.index, columns=data.columns, dtype=float)
 
 # Define all column types
 active_return_cols = [('Daily', 'Active %'), ('WTD', 'Active %'), ('MTD', 'Active %'), ('QTD', 'Active %'), ('YTD', 'Active %'), ('1 year', 'Active %')]
 active_risk_col = [('Active', 'Risk')]
-port_return_cols = [('Daily', 'Port %'), ('WTD', 'Port %'), ('MTD', 'Port %'), ('QTD', 'Port %'), ('YTD', 'Port %'), ('1 year', 'Port %')]
+port_return_cols = [('Daily', 'Port %'), ('WTD', 'Port %'), ('MTD', 'Port %'), ('QTD', 'Port %'), ('YTD', 'Port %'), ('1 year', 'Port %')] # Make sure this matches your MultiIndex
 portfolio_risk_col = [('Portfolio', 'Risk')]
 active_beta_col = [('Active', 'Beta')]
 
 # Define the custom diverging colormap (Red-White-Green)
-# This is a common pattern for financial heatmaps
 cmap_diverging = sns.diverging_palette(10, 145, s=90, l=55, sep=20, as_cmap=True) # Red (10) to Green (145)
 
-# Set NaN values to appear as white
+# Set NaN values to appear as white for all colormaps
 cmap_diverging.set_bad(color='white')
 
 # Apply column-by-column conditional formatting
@@ -30,7 +27,6 @@ for col in data.columns:
     if len(col_data) > 0:
         if col in active_return_cols:
             # For Active returns: Red for negative, White at 0, Green for positive
-            # Calculate the max absolute value to ensure symmetric scaling around 0
             vmax_abs = col_data.abs().max()
             if vmax_abs > 0:
                 norm = TwoSlopeNorm(vmin=-vmax_abs, vcenter=0, vmax=vmax_abs)
@@ -38,24 +34,23 @@ for col in data.columns:
             else:
                 color_matrix[col] = 0.5 # All values are 0, so neutral
         elif col in active_risk_col:
-            # For Active Risk: Green for low (good), White for middle, Red for high (bad)
-            col_min = col_data.min()
-            col_max = col_data.max()
-            if col_max > col_min:
-                # We want to invert the color scale for risk.
-                # A smaller risk is better (green), a larger risk is worse (red).
-                # Normalize values such that min maps to 1 (green end) and max maps to 0 (red end)
-                # This makes values closer to min 'greener' and values closer to max 'redder'.
-                color_matrix[col] = 1 - ((col_data - col_min) / (col_max - col_min))
+            # If Active Risk can have negative values, treat it as a diverging metric:
+            # Negative (good) = Green, Positive (bad) = Red, Zero = White
+            vmax_abs = col_data.abs().max()
+            if vmax_abs > 0:
+                norm = TwoSlopeNorm(vmin=-vmax_abs, vcenter=0, vmax=vmax_abs)
+                color_matrix[col] = col_data.apply(lambda x: norm(x) if pd.notna(x) else np.nan)
             else:
-                color_matrix[col] = 0.5 # All values are the same, so neutral
+                color_matrix[col] = 0.5 # All values are 0, so neutral
+        elif col in port_return_cols or col in portfolio_risk_col or col in active_beta_col:
+            # For these columns, background is white (0.5), text visible
+            color_matrix[col] = 0.5
         else:
-            # For non-formatted columns, or columns where you don't want a diverging scale
-            # We can use a uniform color, or just NaN to show no color
-            color_matrix[col] = np.nan # Or 0.5 if you want a neutral gray/white for these cells
+            # Default for any other unhandled columns
+            color_matrix[col] = np.nan # Will be white due to cmap.set_bad
     else:
-        # If no data, set to NaN to be colored white by cmap.set_bad
-        color_matrix[col] = np.nan
+        # If no data in the column, treat as neutral (white background for display)
+        color_matrix[col] = np.nan # Will be white due to cmap.set_bad
 
 
 annot_matrix = data.copy()
@@ -63,8 +58,5 @@ annot_matrix = annot_matrix.round(2).astype(str)
 annot_matrix = annot_matrix.replace('nan', '')
 
 # Plot the heatmap
-# Set vmin/vmax to 0 and 1 because we've already normalized color_matrix values
-# TwoSlopeNorm outputs values between 0 and 1, where 0.5 is the center (vcenter).
-# For active_risk_col, we also manually scaled to 0-1.
 sns.heatmap(color_matrix, annot=annot_matrix, fmt='', cmap=cmap_diverging,
             vmin=0, vmax=1, cbar=False, ax=ax)
