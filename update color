@@ -1,0 +1,77 @@
+data = merged_df.copy()
+
+# heatmap with conditional formatting
+num_rows = data.shape[0]
+fig_height = max(8, num_rows * 0.5)
+fig, ax = plt.subplots(figsize=(12, fig_height))
+
+# Create a matrix to hold the color values
+color_matrix = pd.DataFrame(index=data.index, columns=data.columns, dtype=float)
+
+# Define all column types
+active_return_cols = [('Daily', 'Active %'), ('WTD', 'Active %'), ('MTD', 'Active %'), 
+                     ('QTD', 'Active %'), ('YTD', 'Active %'), ('1 year', 'Active %')]
+active_risk_col = [('Active', 'Risk')]
+port_return_cols = [('Daily', 'Port %'), ('WTD', 'Port %'), ('MTD', 'Port %'), 
+                    ('QTD', 'Port %'), ('YTD', 'Port %'), ('1 year', 'Port %')]
+portfolio_risk_col = [('Portfolio', 'Risk')]
+active_beta_col = [('Active', 'Beta')]
+
+# Apply column-by-column conditional formatting
+for col in data.columns:
+    if col in active_return_cols:
+        # For Active returns - scale each column independently
+        col_data = data[col].dropna()
+        if len(col_data) > 0:
+            col_min = col_data.min()
+            col_max = col_data.max()
+            col_range = col_max - col_min
+            
+            if col_range > 0:
+                # Center at 0 for each column independently
+                # Find the position of 0 in the column's range
+                zero_position = (0 - col_min) / col_range
+                
+                # Scale values: 
+                # - Values below 0 get scaled from 0 to zero_position
+                # - Values above 0 get scaled from zero_position to 1
+                color_matrix[col] = data[col].apply(lambda x: 
+                    zero_position * (x / col_min) if x < 0 and col_min < 0
+                    else zero_position + (1 - zero_position) * (x / col_max) if x > 0 and col_max > 0
+                    else zero_position if x == 0
+                    else 0.5 if pd.isna(x)
+                    else 0.5
+                )
+            else:
+                color_matrix[col] = 0.5
+                
+    elif col in active_risk_col:
+        # For Active Risk - invert and scale within column
+        col_data = data[col].dropna()
+        if len(col_data) > 0:
+            col_min = col_data.min()
+            col_max = col_data.max()
+            col_range = col_max - col_min
+            
+            if col_range > 0:
+                # Invert: lower values (better) should be green (1), higher values should be red (0)
+                color_matrix[col] = 1 - (data[col] - col_min) / col_range
+            else:
+                color_matrix[col] = 0.5
+                
+    elif col in port_return_cols or col in portfolio_risk_col or col in active_beta_col:
+        # For non-formatted columns - set to 0.5 (neutral/white)
+        color_matrix[col] = 0.5
+    else:
+        color_matrix[col] = 0.5
+
+annot_matrix = data.copy()
+annot_matrix = annot_matrix.round(2).astype(str)
+annot_matrix = annot_matrix.replace('nan', '')
+
+# Create the diverging colormap
+cmap = sns.diverging_palette(10, 145, s=90, l=55, sep=20, as_cmap=True)
+
+# Plot the heatmap with 0-1 scale (since we normalized each column)
+sns.heatmap(color_matrix, annot=annot_matrix, fmt='', cmap=cmap,
+            center=0.5, vmin=0, vmax=1, cbar=False, ax=ax)
