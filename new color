@@ -1,20 +1,23 @@
-# Heatmap generation and saving
-data = merged_df.copy() # Make sure fo_perf is defined earlier
+data = merged_df.copy()
 
 # heatmap with conditional formatting
 num_rows = data.shape[0]
 fig_height = max(8, num_rows * 0.5)
 fig, ax = plt.subplots(figsize=(12, fig_height))
 
-# Create a matrix to hold the color values - initialize with NaN
-color_matrix = pd.DataFrame(np.nan, index=data.index, columns=data.columns)
+# Create a matrix to hold the color values
+color_matrix = pd.DataFrame(index=data.index, columns=data.columns, dtype=float)
 
-# Define which columns need conditional formatting
+# Define all column types
 active_return_cols = [('Daily', 'Active %'), ('WTD', 'Active %'), ('MTD', 'Active %'), 
                      ('QTD', 'Active %'), ('YTD', 'Active %'), ('1 year', 'Active %')]
 active_risk_col = [('Active', 'Risk')]
+port_return_cols = [('Daily', 'Port %'), ('WTD', 'Port %'), ('MTD', 'Port %'), 
+                    ('QTD', 'Port %'), ('YTD', 'Port %'), ('1 year', 'Port %')]
+portfolio_risk_col = [('Portfolio', 'Risk')]
+active_beta_col = [('Active', 'Beta')]
 
-# Apply conditional formatting ONLY to specified columns
+# Apply conditional formatting based on column type
 for col in data.columns:
     if col in active_return_cols:
         # For Active returns - use actual values
@@ -22,7 +25,13 @@ for col in data.columns:
     elif col in active_risk_col:
         # For Active Risk - invert the values so lower risk shows as green
         color_matrix[col] = -data[col]
-    # All other columns remain NaN (will appear white)
+    elif col in port_return_cols or col in portfolio_risk_col or col in active_beta_col:
+        # For Port %, Portfolio Risk, and Active Beta - set to 0 (neutral color)
+        # This ensures they display but with white background
+        color_matrix[col] = 0
+    else:
+        # Any other columns (shouldn't be any) - set to 0
+        color_matrix[col] = 0
 
 annot_matrix = data.copy()
 annot_matrix = annot_matrix.round(2).astype(str)
@@ -30,15 +39,13 @@ annot_matrix = annot_matrix.replace('nan', '')
 
 # Create the diverging colormap centered at 0
 cmap = sns.diverging_palette(10, 145, s=90, l=55, sep=20, as_cmap=True)
-# Set NaN values to appear as white
-cmap.set_bad(color='white')
 
 # Find the maximum absolute value across ONLY the formatted columns
 all_values = []
 for col in active_return_cols + active_risk_col:
     if col in color_matrix.columns:
         all_values.extend(color_matrix[col].dropna().values)
-    
+
 if all_values:
     max_abs_value = max(abs(min(all_values)), abs(max(all_values)))
     vmin = -max_abs_value
@@ -47,5 +54,5 @@ else:
     vmin, vmax = -1, 1
 
 # Plot the heatmap with center at 0
-sns.heatmap(color_matrix, annot=annot_matrix, fmt='', cmap=cmap, 
+sns.heatmap(color_matrix, annot=annot_matrix, fmt='', cmap=cmap,
             center=0, vmin=vmin, vmax=vmax, cbar=False, ax=ax)
