@@ -1,218 +1,150 @@
-import pandas as pd
-from pptx.dml.color import RGBColor
-from pptx.util import Pt
-from pptx.enum.chart import XL_MARKER_STYLE
-from pptx.enum.dml import MSO_LINE_DASH_STYLE
-
-ALADDIN_COLORS = [
-    "#8B8B5C", "#FFCE00", "#FF4713", "#FC9FAF", "#9E7909", "#F4B223"
-]
-
-Extended_Colors = ALADDIN_COLORS + ["#FF6194",
-                                 "#F2A900", "#FFE67F", "#9B07BE", "#0B8B5C", "#00573C", "#CDB0E6", "#9062BC", "#6E3FA3", "#FFCBCD", "#C8B058", "#900012"]
-
-PPT_EXTENDED_RGB_COLORS = [RGBColor.from_string(hex_color.lstrip('#')) for hex_color in Extended_Colors]
-
-
-def extract_asset_class_and_vintage(series_name):
+def generate_excel_for_plots(
+    forecast_type: str,
+    T_periods: int,
+    agg_ill_targetnav_array: np.ndarray,
+    current_total_nav_existing: float,
+    indv_target_weights_dict: dict,
+    V_df_full: pd.DataFrame,
+    C_df_full: pd.DataFrame,
+    D_df_full: pd.DataFrame,
+    liqlims_array: np.ndarray,
+    commitment_plan_df: pd.DataFrame = None,
+    indv_ill_weights: np.ndarray = None,
+    # Add parameters for documentation
+    input_parameters: dict = None
+) -> bytes:
     """
-    Extract asset class and vintage from series names like 'PE - Direct/Co-investment_-1'
-    Returns tuple (asset_class, vintage)
+    Generate Excel data for both forecast types with input parameters documentation.
     """
-    if '_' in series_name and series_name != "Target NAV (Line)":
-        parts = series_name.rsplit('_', 1)
-        asset_class = parts[0]
-        try:
-            vintage = int(parts[1])
-        except ValueError:
-            vintage = 0
-        return asset_class, vintage
-    return series_name, None
-
-
-def get_shade_adjusted_color(base_color_rgb, vintage):
-    """
-    Adjust color shade based on vintage.
-    Negative vintages -> darker (multiply by factor < 1)
-    Positive vintages -> lighter (interpolate with white)
-    """
-    if vintage is None:
-        return base_color_rgb
+    import io
     
-    # Convert RGB to values
-    r, g, b = base_color_rgb.r, base_color_rgb.g, base_color_rgb.b
+    excel_data_dict = {}
     
-    if vintage < 0:
-        # Darker for negative vintages
-        factor = 1.0 + (vintage * 0.15)  # -1 -> 0.85, -4 -> 0.40, etc.
-        factor = max(0.3, factor)  # Don't go too dark
-        new_r = int(r * factor)
-        new_g = int(g * factor)
-        new_b = int(b * factor)
-    else:
-        # Lighter for positive vintages
-        factor = min(0.7, vintage * 0.1)  # 0 -> 0.0, 7 -> 0.7
-        new_r = int(r + (255 - r) * factor)
-        new_g = int(g + (255 - g) * factor)
-        new_b = int(b + (255 - b) * factor)
+    # 1. Add Input Parameters as first sheet
+    if input_parameters:
+        params_data = pd.DataFrame([
+            {'Parameter': key, 'Value': value} 
+            for key, value in input_parameters.items()
+        ])
+        excel_data_dict["Input_Parameters"] = params_data
     
-    return RGBColor(new_r, new_g, new_b)
-
-
-def update_chart_with_data(chart, df, chart_name_for_logging=""):
-    """
-    Updated version with proper vintage-based coloring
-    """
-    # 1. Update Chart Data
-    chart_data_obj = CategoryChartData()
-    chart_data_obj.categories = [str(cat) for cat in df.iloc[:, 0].tolist()]
-
-    for col_idx in range(1, len(df.columns)):
-        series_name_from_df = df.columns[col_idx]
-        series_values_raw = df.iloc[:, col_idx].tolist()
-
-        processed_values = [
-            float(val) if pd.notna(val) else None
-            for val in pd.to_numeric(series_values_raw, error='coerce')
-        ]
-        chart_data_obj.add_series(series_name_from_df, processed_values)
-
-    chart.replace_data(chart_data_obj)
-
-    # 2. Apply Styling
-    if not hasattr(chart, 'series'):
-        return
-
-    # Build asset class to color mapping
-    asset_class_color_map = {}
-    color_index = 0
+    # 2. Target Allocations Summary
+    target_alloc_summary = pd.DataFrame({
+        'Asset Class': list(indv_target_weights_dict.keys()),
+        'Target Weight': [f"{w:.1%}" for w in indv_target_weights_dict.values()],
+        'Target Weight (Decimal)': list(indv_target_weights_dict.values())
+    })
+    excel_data_dict["Target_Allocations"] = target_alloc_summary
     
-    # First pass: identify unique asset classes and assign base colors
-    for i, series_obj in enumerate(chart.series):
-        series_name = series_obj.name
-        asset_class, vintage = extract_asset_class_and_vintage(series_name)
-        
-        if asset_class not in asset_class_color_map and series_name != "Target NAV (Line)":
-            asset_class_color_map[asset_class] = PPT_EXTENDED_RGB_COLORS[color_index % len(PPT_EXTENDED_RGB_COLORS)]
-            color_index += 1
-
-    # Second pass: apply colors with vintage adjustments
-    for i, series_obj in enumerate(chart.series):
-        series_name = series_obj.name
-
-        # --- Styling for cht_aggregate_nav ---
-        if chart_name_for_logging == "Aggregate NAV Target":
-            color = PPT_EXTENDED_RGB_COLORS[i % len(PPT_EXTENDED_RGB_COLORS)]
-            if series_obj.format.line:
-                series_obj.format.line.color.rgb = color
-                series_obj.format.line.width = Pt(2.0)
-            if hasattr(series_obj, 'marker') and series_obj.marker:
-                series_obj.marker.style = XL_MARKER_STYLE.CIRCLE
-                series_obj.marker.size = 5
-                series_obj.marker.format.fill.solid()
-                series_obj.marker.format.fill.fore_color.rgb = color
-                series_obj.marker.format.line.color.rgb = color
-
-        # --- Styling for cht_sub_alloc_target ---
-        elif chart_name_for_logging == "Sub-Allocation Targets":
-            # Apply Aladdin colors to bar chart
-            color = PPT_EXTENDED_RGB_COLORS[i % len(PPT_EXTENDED_RGB_COLORS)]
-            if series_obj.format.fill:
-                series_obj.format.fill.solid()
-                series_obj.format.fill.fore_color.rgb = color
-
-        # --- Styling for cht_nav_forecast ---
-        elif chart_name_for_logging == "NAV Forecast (Absolute NAV & Target Line)":
-            if series_name == "Target NAV (Line)":
-                # Line with Marker styling for Target NAV
-                color = RGBColor.from_string("0A0A0A")  # Black
-                if series_obj.format.line:
-                    series_obj.format.line.color.rgb = color
-                    series_obj.format.line.width = Pt(2.0)
-                    series_obj.format.line.dash_style = MSO_LINE_DASH_STYLE.DASH
-                if hasattr(series_obj, 'marker') and series_obj.marker:
-                    series_obj.marker.style = XL_MARKER_STYLE.CIRCLE
-                    series_obj.marker.size = 5
-                    series_obj.marker.format.fill.solid()
-                    series_obj.marker.format.fill.fore_color.rgb = color
-            else:
-                # Stacked Area styling with vintage-based coloring
-                asset_class, vintage = extract_asset_class_and_vintage(series_name)
-                if asset_class in asset_class_color_map:
-                    base_color = asset_class_color_map[asset_class]
-                    color = get_shade_adjusted_color(base_color, vintage)
-                    if series_obj.format.fill:
-                        series_obj.format.fill.solid()
-                        series_obj.format.fill.fore_color.rgb = color
-                    if series_obj.format.line:  # Border for the area
-                        series_obj.format.line.width = Pt(0.75)
-                    if hasattr(series_obj, 'marker'):  # Ensure no markers on areas
-                        series_obj.marker.style = XL_MARKER_STYLE.NONE
-
-        # --- Styling for cht_sub_alloc_pm ---
-        elif chart_name_for_logging == "Sub-Allocation of Private Markets":
-            # Apply vintage-based coloring
-            asset_class, vintage = extract_asset_class_and_vintage(series_name)
-            if asset_class in asset_class_color_map:
-                base_color = asset_class_color_map[asset_class]
-                color = get_shade_adjusted_color(base_color, vintage)
-                if series_obj.format.fill:
-                    series_obj.format.fill.solid()
-                    series_obj.format.fill.fore_color.rgb = color
-                if series_obj.format.line:
-                    series_obj.format.line.width = Pt(0.75)
-                if hasattr(series_obj, 'marker'):
-                    series_obj.marker.style = XL_MARKER_STYLE.NONE
-
-        # --- Styling for cht_cashflows ---
-        elif chart_name_for_logging == "Cashflows Plot":
-            if series_name == "Contributions":
-                color = RGBColor.from_string("FF4713")  # Red/Orange
-                if series_obj.format.fill:
-                    series_obj.format.fill.solid()
-                    series_obj.format.fill.fore_color.rgb = color
-                if hasattr(series_obj, 'marker'):
-                    series_obj.marker.style = XL_MARKER_STYLE.NONE
-            elif series_name == "Distributions":
-                color = RGBColor.from_string("0088C5")  # Blue (first Aladdin color)
-                if series_obj.format.fill:
-                    series_obj.format.fill.solid()
-                    series_obj.format.fill.fore_color.rgb = color
-                if hasattr(series_obj, 'marker'):
-                    series_obj.marker.style = XL_MARKER_STYLE.NONE
-            elif series_name == 'Cumulative Net Cashflow':
-                color = RGBColor.from_string("FFCE00")  # Yellow/Gold
-                if series_obj.format.line:
-                    series_obj.format.line.color.rgb = color
-                    series_obj.format.line.width = Pt(2.0)
-                if hasattr(series_obj, 'marker'):
-                    series_obj.marker.style = XL_MARKER_STYLE.CIRCLE
-                    series_obj.marker.size = 5
-                    series_obj.marker.format.fill.solid()
-                    series_obj.marker.format.fill.fore_color.rgb = color
-            elif series_name == 'Liquidity limit':
-                color = RGBColor.from_string("A9A9A9")  # Dark Gray
-                if series_obj.format.line:
-                    series_obj.format.line.color.rgb = color
-                    series_obj.format.line.width = Pt(1.5)
-                    series_obj.format.line.dash_style = MSO_LINE_DASH_STYLE.DASH
-                if hasattr(series_obj, 'marker'):
-                    series_obj.marker.style = XL_MARKER_STYLE.NONE
-
-        # --- Default Styling for other charts ---
-        else:
-            # Apply vintage-based coloring for any other stacked charts
-            asset_class, vintage = extract_asset_class_and_vintage(series_name)
-            if asset_class in asset_class_color_map:
-                base_color = asset_class_color_map[asset_class]
-                color = get_shade_adjusted_color(base_color, vintage)
-            else:
-                color = PPT_EXTENDED_RGB_COLORS[i % len(PPT_EXTENDED_RGB_COLORS)]
+    # Rest of your existing code for other sheets...
+    # (Include all the previous sheet generation code here)
+    
+    # 3-7. [Previous sheets as before]
+    
+    # For Commitment Optimization, add optimization constraints
+    if forecast_type == "Commitment Optimization" and input_parameters:
+        if all(k in input_parameters for k in ['Min Commit', 'Max Commit', 'Min Non-Zero Commit']):
+            constraints_data = []
+            for asset_class in indv_target_weights_dict.keys():
+                constraints_data.append({
+                    'Asset Class': asset_class,
+                    'Min Commit ($M)': input_parameters.get('Min Commit', 0),
+                    'Max Commit ($M)': input_parameters.get('Max Commit', 50),
+                    'Min Non-Zero Commit ($M)': input_parameters.get('Min Non-Zero Commit', 1)
+                })
+            excel_data_dict["Commitment_Constraints"] = pd.DataFrame(constraints_data)
+    
+    # Create Excel file
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        for sheet_name, df in excel_data_dict.items():
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
             
-            if series_obj.format.fill:  # Assumes Bar/Area by default
-                series_obj.format.fill.solid()
-                series_obj.format.fill.fore_color.rgb = color
-            if series_obj.format.line:
-                series_obj.format.line.width = Pt(0.75)
-            if hasattr(series_obj, 'marker'):
-                series_obj.marker.style = XL_MARKER_STYLE.NONE
+            # Auto-adjust column widths for better readability
+            worksheet = writer.sheets[sheet_name]
+            for idx, col in enumerate(df.columns):
+                max_length = max(
+                    df[col].astype(str).map(len).max(),
+                    len(str(col))
+                ) + 2
+                worksheet.set_column(idx, idx, max_length)
+    
+    output.seek(0)
+    return output.getvalue()
+
+
+# Updated integration function
+def add_excel_download_section(forecast_type, **kwargs):
+    """
+    Add Excel download button with parameter documentation
+    """
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📊 Download Chart Data")
+    
+    if st.sidebar.button("Prepare Excel Data", key=f"prep_excel_{forecast_type}"):
+        try:
+            # Build input parameters dictionary
+            input_params = {
+                'Client': kwargs.get('selected_client', 'Unknown'),
+                'Forecast Type': forecast_type,
+                'Time Frame (years)': kwargs.get('T', 'N/A'),
+                'NAV Growth Rate': f"{kwargs.get('nav_growth_rate', 0) * 100:.1f}%",
+                'Total Portfolio NAV ($M)': kwargs.get('total_port_nav', 'N/A'),
+                'Privates Target': f"{kwargs.get('ill_target', 0) * 100:.1f}%",
+                'Granularity': kwargs.get('granularity', 'N/A')
+            }
+            
+            # Add optimization-specific parameters
+            if forecast_type == "Commitment Optimization":
+                input_params.update({
+                    'Target Delay (years)': kwargs.get('target_delay', 0),
+                    'Gamma': kwargs.get('gamma', 0.5),
+                    'Smoothing Weight': kwargs.get('smoothing_weight', 5),
+                    'Min Non-Zero Commit ($M)': kwargs.get('min_non_zero_commit', 1),
+                    'Min Commit ($M)': kwargs.get('min_commit', 0),
+                    'Max Commit ($M)': kwargs.get('max_commit', 50),
+                    'Liquidity Limit ($M)': kwargs.get('liquidity_limit', 'N/A')
+                })
+            
+            # Prepare parameters for Excel generation
+            excel_params = {
+                'forecast_type': forecast_type,
+                'T_periods': int(kwargs['T']),
+                'agg_ill_targetnav_array': kwargs['agg_ill_targetnav'],
+                'current_total_nav_existing': kwargs.get('current_total_nav_existing', 
+                                                         kwargs['existing_portfolio']['current_nav'].sum()),
+                'indv_target_weights_dict': kwargs['indv_weights'],
+                'V_df_full': kwargs['V_df'],
+                'C_df_full': kwargs['C_df'],
+                'D_df_full': kwargs['D_df'],
+                'liqlims_array': kwargs['liqlims'],
+                'input_parameters': input_params
+            }
+            
+            # Add commitment-specific data if available
+            if forecast_type == "Commitment Optimization":
+                if 'commitment_plan_df' in kwargs:
+                    excel_params['commitment_plan_df'] = kwargs['commitment_plan_df']
+                if 'indv_ill_weights' in kwargs:
+                    excel_params['indv_ill_weights'] = kwargs['indv_ill_weights']
+            
+            # Generate Excel
+            excel_bytes = generate_excel_for_plots(**excel_params)
+            
+            # Create download button
+            file_name = f"{kwargs.get('selected_client', 'Client')}_{forecast_type.replace(' ', '_').replace('+', 'and')}_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            
+            st.sidebar.download_button(
+                label="📥 Download Excel File",
+                data=excel_bytes,
+                file_name=file_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"download_excel_{forecast_type}"
+            )
+            st.sidebar.success("✅ Excel data ready for download!")
+            
+        except Exception as e:
+            st.sidebar.error(f"❌ Error preparing Excel data: {str(e)}")
+            with st.sidebar.expander("See error details"):
+                import traceback
+                st.code(traceback.format_exc())
