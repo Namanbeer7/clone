@@ -1,0 +1,442 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import tempfile
+import os
+from datetime import datetime
+from pptx import Presentation
+from pptx.chart.data import CategoryChartData
+from pptx.dml.color import RGBColor
+from pptx.util import Inches, Pt
+from ppt_tools.ppt_slides import PPTSlide
+from ppt_tools.ppt_charts import PPTChart
+from ppt_tools.ppt_tables import PPTTable
+
+# Color palette
+ALADDIN_COLORS = [
+    '#0088C5', '#FFCE00', '#FF4713', '#FC9FAF', '#9E79D9', '#F4B223',
+]
+
+EXTENDED_COLORS = ALADDIN_COLORS + [
+    '#FFB194', '#F2A900', '#FFE67F', '#98D7BE', '#0088C5', '#00573C', 
+    '#CDB9E6', '#9062BC', '#6E3FA3', '#FFC8CD', '#C8005B', '#990012'
+]
+
+
+def prepare_chart_data(commit_df, granularity_level, template_chart=None):
+    """
+    Prepare data for the stacked area chart based on granularity
+    
+    Parameters:
+    -----------
+    commit_df : DataFrame
+        The original commitment data
+    granularity_level : str
+        The desired granularity level ('Broad' or 'Granular')
+    template_chart : chart object, optional
+        The template chart to match structure
+        
+    Returns:
+    --------
+    DataFrame
+        Data in the format required for updating the PowerPoint chart
+    """
+    # Clone the data to avoid modifying the original
+    df = commit_df.copy()
+    
+    # Determine the sector column based on granularity
+    sector_col = 'sector_level_1' if granularity_level == 'Broad' else 'sector_level_2'
+    
+    # Group and pivot the data
+    grouped_data = df.groupby(['year', sector_col])['called_sum'].sum().reset_index()
+    chart_data = grouped_data.pivot(index='year', columns=sector_col, values='called_sum').reset_index()
+    chart_data = chart_data.fillna(0)
+    
+    # Try to match template structure if provided
+    if template_chart:
+        try:
+            existing_categories = [cat.label for cat in template_chart.plots[0].categories]
+            existing_series = [series.name for series in template_chart.series]
+            st.write(f"Template chart has categories: {existing_categories}")
+            st.write(f"Template chart has series: {existing_series}")
+            
+            # Create template DataFrame structure
+            template_df = pd.DataFrame({'Categories': existing_categories})
+            for series_name in existing_series:
+                template_df[series_name] = 0
+            
+            # Fill template with actual data
+            for year in chart_data['year'].unique():
+                if str(year) in existing_categories:
+                    idx = existing_categories.index(str(year))
+                    for series_name in existing_series:
+                        if series_name in chart_data.columns:
+                            year_data = chart_data[chart_data['year'] == year]
+                            if not year_data.empty:
+                                template_df.loc[idx, series_name] = year_data[series_name].values[0]
+            
+            chart_data = template_df
+            
+        except Exception as e:
+            st.warning(f"Could not match template structure: {str(e)}")
+    
+    # Rename year column to Categories for PowerPoint
+    if 'year' in chart_data.columns:
+        chart_data.rename(columns={'year': 'Categories'}, inplace=True)
+    
+    return chart_data
+
+
+def export_charts_to_ppt(commit_df, template_path, output_path, granularity, client_name):
+    """
+    Export charts to PowerPoint template
+    
+    Parameters:
+    -----------
+    commit_df : DataFrame
+        The commitment data with required columns
+    template_path : str
+        Path to the PowerPoint template
+    output_path : str
+        Path for the output file
+    granularity : str
+        'Broad' or 'Granular' granularity level
+    client_name : str
+        Client name for logging
+        
+    Returns:
+    --------
+    bool
+        True if export was successful, False otherwise
+    """
+    try:
+        prs = Presentation(template_path)
+        chart_shapes = []
+
+        # Find all chart shapes in the presentation
+        for i, slide in enumerate(prs.slides):
+            for shape in slide.shapes:
+                try:
+                    if hasattr(shape, 'chart') and shape.chart is not None and hasattr(shape.chart, 'replace_data'):
+                        chart_shapes.append((i, shape))
+                except Exception as shape_check_error:
+                    st.warning(f"Shape '{shape.name}' has chart attribute but not valid chart object: {str(shape_check_error)}")
+
+        if not chart_shapes:
+            st.warning("No charts found in the template")
+            return False
+
+        # Determine sector column based on granularity
+        sector_col_broad = 'sector_level_1'
+        sector_col_granular = 'sector_level_2'
+        df = commit_df.copy()
+
+        # Update each chart found
+        for slide_idx, shape in chart_shapes:
+            chart = shape.chart
+            chart_name = shape.name
+            st.write(f"Updating Chart '{chart_name}' on slide {slide_idx+1}")
+
+            # Choose sector column based on chart name or default granularity
+            sector_col = sector_col_granular if 'granular' in chart_name.lower() else sector_col_broad
+            
+            # Group data for the chart
+            grouped_data = df.groupby(['year', sector_col])['called_sum'].sum().reset_index()
+
+            # Create chart data object
+            chart_data = CategoryChartData()
+            
+            # Set up categories (years)
+            years = sorted(grouped_data['year'].unique())
+            chart_data.categories = [str(year) for year in years]
+
+            # Add series for each sector
+            sectors = sorted(grouped_data[sector_col].unique())
+            for sector in sectors:
+                values = []
+                for year in years:
+                    row = grouped_data[(grouped_data['year'] == year) & (grouped_data[sector_col] == sector)]
+                    if not row.empty:
+                        values.append(float(row['called_sum'].values[0]))
+                    else:
+                        values.append(0.0)
+                chart_data.add_series(sector, values)
+
+            try:
+                chart.replace_data(chart_data)
+                st.write(f"Successfully updated chart '{chart_name}'")
+            except Exception as e:
+                st.error(f"Error updating chart data for '{chart_name}': {str(e)}")
+
+        # Save the presentation
+        prs.save(output_path)
+        st.success("PowerPoint file saved successfully")
+        return True
+
+    except Exception as e:
+        st.error(f"Error exporting charts to PowerPoint: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return False
+
+
+def export_combined_tables_to_ppt(strat_agg_combined, template_path, output_path, client_name):
+    """
+    Export strategy tables to PowerPoint template
+    
+    Parameters:
+    -----------
+    strat_agg_combined : dict
+        Dictionary containing 'broad' and 'granular' DataFrames
+    template_path : str
+        Path to the PowerPoint template
+    output_path : str
+        Path for the output file
+    client_name : str
+        Client name for logging
+        
+    Returns:
+    --------
+    bool
+        True if export was successful, False otherwise
+    """
+    try:
+        prs = Presentation(template_path)
+        slide_helper = PPTSlide(prs)
+        shapes, ppt_objects = slide_helper.prs_objects()
+        
+        # Configuration for different table types
+        table_configs = [
+            {
+                "name": "tbd_strategy_broad",
+                "df_key": "broad",
+                "sector_col": "sector_level_1"
+            },
+            {
+                "name": "tbd_strategy_granular", 
+                "df_key": "granular",
+                "sector_col": "sector_level_2"
+            }
+        ]
+        
+        any_table_updated = False
+        
+        for config in table_configs:
+            table_name = config["name"]
+            df_key = config["df_key"]
+            sector_col = config["sector_col"]
+            
+            # Check if data exists for this table type
+            if df_key in strat_agg_combined and strat_agg_combined[df_key] is not None:
+                df_to_update = strat_agg_combined[df_key].copy()
+                st.write(f"Attempting to update table '{table_name}' with data shape: {df_to_update.shape}")
+                
+                if table_name in ppt_objects:
+                    st.write(f"Found table '{table_name}' to update with strategy data")
+                    
+                    # Find table shapes across all slides
+                    for slide_idx, slide in enumerate(prs.slides):
+                        table_shapes = []
+                        for shape_idx, shape in enumerate(slide.shapes):
+                            if shape.name == table_name:
+                                table_shapes.append(shape)
+                        
+                        if not table_shapes:
+                            continue
+                            
+                        st.write(f"Found {len(table_shapes)} shapes with name '{table_name}' on slide {slide_idx+1}")
+                        
+                        for shape in table_shapes:
+                            try:
+                                # Validate table shape
+                                if not hasattr(shape, 'table'):
+                                    st.warning(f"Shape '{shape.name}' doesn't have a table attribute")
+                                    continue
+                                    
+                                table = shape.table
+                                if table is None:
+                                    st.warning(f"Shape '{shape.name}' has a None table")
+                                    continue
+                                    
+                                row_count = len(table.rows)
+                                col_count = len(table.columns)
+                                st.write(f"Table dimensions: {row_count} rows x {col_count} columns")
+                                
+                                # Use table handler for advanced operations
+                                table_handler = PPTTable(table, prs)
+                                df_rows = len(df_to_update)
+                                required_rows = df_rows + 1  # +1 for header
+                                
+                                # Add rows if needed
+                                if required_rows > row_count:
+                                    rows_to_add = required_rows - row_count
+                                    try:
+                                        table_handler.update_table_addrow_deep(rows=rows_to_add)
+                                        st.write(f"Added {rows_to_add} rows to table '{table_name}'")
+                                        row_count = len(table.rows)
+                                    except Exception as row_error:
+                                        st.error(f"Error adding rows: {str(row_error)}")
+                                
+                                # Update table data
+                                updated_count = 0
+                                error_count = 0
+                                
+                                safe_row_limit = min(row_count, df_rows + 1)
+                                df_columns = list(df_to_update.columns)
+                                safe_col_limit = min(col_count, len(df_columns))
+                                
+                                st.write("DataFrame columns:", df_columns)
+                                st.write("Table columns count:", col_count)
+                                
+                                # Check for column mismatch
+                                if len(df_columns) != col_count:
+                                    st.warning(f"Column mismatch: DataFrame has {len(df_columns)} columns, table has {col_count}")
+                                
+                                # Update table cells (skip header row)
+                                for row_idx in range(1, safe_row_limit):
+                                    df_row_idx = row_idx - 1
+                                    
+                                    if df_row_idx >= len(df_to_update):
+                                        break
+                                        
+                                    row_data = df_to_update.iloc[df_row_idx]
+                                    row = table.rows[row_idx]
+                                    
+                                    for col_idx in range(safe_col_limit):
+                                        try:
+                                            cell = row.cells[col_idx]
+                                            col_name = df_columns[col_idx]
+                                            value = row_data[col_name]
+                                            
+                                            # Format numeric values
+                                            if isinstance(value, (int, float)):
+                                                if col_name in ['called_cap_%', 'DPI', 'TVPI']:
+                                                    value = "{:.1f}".format(value)
+                                                else:
+                                                    value = "{:.0f}".format(value)
+                                                    
+                                            cell.text = str(value)
+                                            updated_count += 1
+                                            
+                                        except Exception as cell_error:
+                                            st.warning(f"Error updating cell ({row_idx},{col_idx}): {str(cell_error)}")
+                                            error_count += 1
+                                
+                                st.write(f"Updated {updated_count} cells with {error_count} errors")
+                                if updated_count > 0:
+                                    st.write(f"Successfully updated table '{table_name}' on slide {slide_idx + 1}")
+                                    any_table_updated = True
+                                    
+                            except Exception as shape_error:
+                                st.error(f"Error processing shape: {str(shape_error)}")
+                else:
+                    st.warning(f"No table named '{table_name}' found in the template")
+            else:
+                st.warning(f"No data available for '{table_name}'. Make sure both broad and granular data are provided")
+        
+        # Save the presentation
+        prs.save(output_path)
+        st.write("PowerPoint file saved successfully")
+        
+        if any_table_updated:
+            st.write("Tables exported successfully")
+            return True
+        else:
+            st.warning("No tables were updated")
+            return False
+            
+    except Exception as e:
+        st.error(f"Error exporting tables to PowerPoint: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return False
+
+
+def add_ppt_export_section(commit_df, granularity, client_name, strat_agg_dict):
+    """
+    Add PowerPoint export section to Streamlit app
+    
+    Parameters:
+    -----------
+    commit_df : DataFrame
+        The commitment data for charts
+    granularity : str
+        'Broad' or 'Granular' granularity level
+    client_name : str
+        Client name for file naming
+    strat_agg_dict : dict
+        Dictionary containing strategy aggregation data
+    """
+    st.subheader("Export to PowerPoint")
+    
+    # File uploader for template
+    template_file = st.file_uploader(
+        "Upload PowerPoint Template", 
+        type=["pptx"], 
+        key="ppt_template_uploader"
+    )
+    
+    if template_file is not None:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pptx') as tmp_file:
+            tmp_file.write(template_file.getbuffer())
+            temp_template_path = tmp_file.name
+            
+        if st.button("Export to PowerPoint"):
+            try:
+                output_file = f"{client_name}_exported_data.pptx"
+                chart_success = False
+                table_success = False
+                
+                # Export charts
+                try:
+                    chart_success = export_charts_to_ppt(
+                        commit_df=commit_df,
+                        template_path=temp_template_path,
+                        output_path=output_file,
+                        granularity=granularity,
+                        client_name=client_name
+                    )
+                    if chart_success:
+                        st.write("Charts exported successfully")
+                except Exception as chart_error:
+                    st.error(f"Error exporting charts: {str(chart_error)}")
+                    chart_success = False
+                    
+                # Export tables
+                try:
+                    table_success = export_combined_tables_to_ppt(
+                        strat_agg_combined=strat_agg_dict,
+                        template_path=output_file if chart_success else temp_template_path,
+                        output_path=output_file,
+                        client_name=client_name
+                    )
+                    if table_success:
+                        st.write("Tables exported successfully")
+                except Exception as table_error:
+                    st.error(f"Error exporting tables: {str(table_error)}")
+                    table_success = False
+                    
+                # Provide download if any export succeeded
+                success = chart_success or table_success
+                if success:
+                    with open(output_file, "rb") as file:
+                        st.download_button(
+                            label="Download PowerPoint",
+                            data=file,
+                            file_name=output_file,
+                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                        )
+                    st.success("Export completed successfully!")
+                else:
+                    st.error("Failed to export charts and tables")
+                    
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
+                import traceback
+                st.error(traceback.format_exc())
+            finally:
+                # Clean up temporary template file
+                try:
+                    os.unlink(temp_template_path)
+                except:
+                    pass
