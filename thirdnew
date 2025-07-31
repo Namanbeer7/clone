@@ -1,0 +1,503 @@
+# private_viz_ppt_export.py
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+from pptx import Presentation
+from pptx.chart.data import CategoryChartData
+from pptx.dml.color import RGBColor
+from pptx.util import Pt
+from pptx.enum.chart import XL_MARKER_STYLE
+from datetime import datetime
+import tempfile
+import os
+import io
+
+# Color palette matching cashflow export
+ALADDIN_COLORS = [
+    '#008B5C', '#FFCE00', '#FF4713', '#FC9FAF', '#9E79D9', '#F4B223',
+]
+
+Extended_Colors = ALADDIN_COLORS + ['#FFB194',
+    '#F2A900', '#FFE67F', '#9BD7BE', '#008B5C', '#00573C', '#CDB9E6', '#9062BC', '#6E3FA3', '#FFC8CD', '#C80058', '#990012']
+
+# Convert hex colors to RGBColor objects
+PPT_EXTENDED_RGB_COLORS = []
+for hex_color in Extended_Colors:
+    hex_color = hex_color.lstrip('#')
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    PPT_EXTENDED_RGB_COLORS.append(RGBColor(r, g, b))
+
+
+def prepare_stacked_area_data(commit_df, sector_col):
+    """
+    Prepare data for the stacked area chart with called and uncalled amounts
+    
+    Args:
+        commit_df: DataFrame with commitment data
+        sector_col: Either 'sector_level_1' or 'sector_level_2'
+    """
+    # Create a copy to avoid modifying original
+    df = commit_df.copy()
+    
+    # Ensure we have the sector column
+    if 'sector' in df.columns and sector_col not in df.columns:
+        df[sector_col] = df['sector']
+    
+    # Group by year and sector for both called and uncalled
+    grouped = df.groupby(['year', sector_col])[['called_sum', 'uncalled_sum']].sum().reset_index()
+    
+    # Create separate dataframes for called and uncalled
+    called_pivot = grouped.pivot(index='year', columns=sector_col, values='called_sum').fillna(0)
+    uncalled_pivot = grouped.pivot(index='year', columns=sector_col, values='uncalled_sum').fillna(0)
+    
+    # Reset index for both
+    called_pivot = called_pivot.reset_index()
+    uncalled_pivot = uncalled_pivot.reset_index()
+    
+    # Rename columns to include (called) and (uncalled) suffixes
+    called_cols = {col: f"{col} (called)" for col in called_pivot.columns if col != 'year'}
+    uncalled_cols = {col: f"{col} (uncalled)" for col in uncalled_pivot.columns if col != 'year'}
+    
+    called_pivot.rename(columns=called_cols, inplace=True)
+    uncalled_pivot.rename(columns=uncalled_cols, inplace=True)
+    
+    # Merge the dataframes
+    combined_df = called_pivot.merge(uncalled_pivot, on='year')
+    combined_df.rename(columns={'year': 'Year'}, inplace=True)
+    
+    # Reorder columns to alternate between called and uncalled for each sector
+    sectors = [col.replace(' (called)', '') for col in called_pivot.columns if col != 'year']
+    ordered_cols = ['Year']
+    for sector in sectors:
+        ordered_cols.append(f"{sector} (called)")
+        ordered_cols.append(f"{sector} (uncalled)")
+    
+    # Filter to only include columns that exist
+    ordered_cols = [col for col in ordered_cols if col in combined_df.columns]
+    combined_df = combined_df[ordered_cols]
+    
+    return combined_df
+
+
+def prepare_bubble_chart_data(dff_pos, sector_level):
+    """
+    Prepare bubble chart data for Excel export
+    
+    Args:
+        dff_pos: Position dataframe filtered by client
+        sector_level: 'sector_level_1' or 'sector_level_2'
+    """
+    # Select relevant columns for bubble chart
+    bubble_data = dff_pos[['fund_name', 'commit_date', 'called_cap_%', 'commitment', sector_level]].copy()
+    
+    # Rename columns for clarity
+    bubble_data.columns = ['Fund Name', 'Commitment Date', 'Called Capital %', 'Commitment Size', 'Sector']
+    
+    # Convert commitment date to string format for Excel
+    bubble_data['Commitment Date'] = pd.to_datetime(bubble_data['Commitment Date']).dt.strftime('%Y-%m-%d')
+    
+    # Format Called Capital % as percentage
+    bubble_data['Called Capital %'] = bubble_data['Called Capital %'] * 100
+    
+    return bubble_data
+
+
+def update_chart_with_data(chart, df, chart_name=""):
+    """
+    Update chart data and apply consistent styling with called/uncalled color pattern
+    """
+    try:
+        # Create chart data object
+        chart_data = CategoryChartData()
+        
+        # First column should be categories
+        chart_data.categories = [str(cat) for cat in df.iloc[:, 0].tolist()]
+        
+        # Add series for each subsequent column
+        for col_idx in range(1, len(df.columns)):
+            series_name = df.columns[col_idx]
+            series_values = df.iloc[:, col_idx].tolist()
+            
+            # Handle None/NaN values
+            processed_values = [
+                float(val) if pd.notna(val) else None 
+                for val in pd.to_numeric(series_values, errors='coerce')
+            ]
+            
+            chart_data.add_series(series_name, processed_values)
+        
+        # Replace chart data
+        chart.replace_data(chart_data)
+        
+        # Apply styling based on chart type
+        if hasattr(chart, 'series'):
+            color_index = 0
+            sector_color_map = {}
+            
+            for i, series in enumerate(chart.series):
+                series_name = series.name
+                
+                # Extract sector name and type (called/uncalled)
+                if '(called)' in series_name:
+                    sector = series_name.replace(' (called)', '').strip()
+                    is_called = True
+                elif '(uncalled)' in series_name:
+                    sector = series_name.replace(' (uncalled)', '').strip()
+                    is_called = False
+                else:
+                    # For series without called/uncalled designation
+                    sector = series_name
+                    is_called = True
+                
+                # Assign base color to sector if not already assigned
+                if sector not in sector_color_map:
+                    sector_color_map[sector] = PPT_EXTENDED_RGB_COLORS[color_index % len(PPT_EXTENDED_RGB_COLORS)]
+                    color_index += 1
+                
+                base_color = sector_color_map[sector]
+                
+                # Apply color with transparency for uncalled
+                if hasattr(series.format, 'fill'):
+                    series.format.fill.solid()
+                    if is_called:
+                        # Full color for called
+                        series.format.fill.fore_color.rgb = base_color
+                    else:
+                        # Lighter color for uncalled (simulate transparency)
+                        # Extract RGB values and lighten them
+                        r = (base_color.rgb >> 16) & 0xFF
+                        g = (base_color.rgb >> 8) & 0xFF
+                        b = base_color.rgb & 0xFF
+                        
+                        # Lighten by blending with white (60% transparency effect)
+                        alpha = 0.4  # 40% of original color, 60% white
+                        new_r = int(r * alpha + 255 * (1 - alpha))
+                        new_g = int(g * alpha + 255 * (1 - alpha))
+                        new_b = int(b * alpha + 255 * (1 - alpha))
+                        
+                        lighter_color = RGBColor(new_r, new_g, new_b)
+                        series.format.fill.fore_color.rgb = lighter_color
+                
+                # Add thin border for better visibility
+                if hasattr(series.format, 'line'):
+                    series.format.line.color.rgb = RGBColor(255, 255, 255)  # White border
+                    series.format.line.width = Pt(0.5)
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Error updating chart '{chart_name}': {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return False
+
+
+def export_charts_to_ppt(commit_df, template_path, output_path, granularity, client_name):
+    """
+    Export charts to PowerPoint template
+    """
+    try:
+        prs = Presentation(template_path)
+        
+        # Determine which charts to update based on granularity
+        if granularity == 'Broad':
+            chart_name = "cht_stacked_area_broad"
+            sector_col = 'sector_level_1'
+        else:
+            chart_name = "cht_stacked_area_granular"
+            sector_col = 'sector_level_2'
+        
+        st.write(f"Processing chart: {chart_name}")
+        
+        # Prepare data
+        chart_data = prepare_stacked_area_data(commit_df, sector_col)
+        
+        if chart_data.empty:
+            st.warning(f"No data for {chart_name}")
+            return False
+        
+        st.write(f"Data shape for {chart_name}: {chart_data.shape}")
+        st.dataframe(chart_data.head())
+        
+        # Find and update chart in presentation
+        chart_found = False
+        for slide_idx, slide in enumerate(prs.slides):
+            for shape in slide.shapes:
+                if shape.name == chart_name:
+                    st.write(f"Found chart '{chart_name}' on slide {slide_idx + 1}")
+                    
+                    if hasattr(shape, 'chart') and shape.chart is not None:
+                        if update_chart_with_data(shape.chart, chart_data, chart_name):
+                            chart_found = True
+                            break
+                    else:
+                        st.warning(f"Shape '{chart_name}' is not a valid chart")
+            
+            if chart_found:
+                break
+        
+        if not chart_found:
+            st.warning(f"Chart '{chart_name}' not found in template")
+            return False
+        
+        # Save presentation
+        prs.save(output_path)
+        st.success(f"Chart '{chart_name}' updated successfully")
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Error in export_charts_to_ppt: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return False
+
+
+def export_combined_tables_to_ppt(strat_agg_combined, template_path, output_path, client_name):
+    """
+    Export strategy tables to PowerPoint template
+    """
+    try:
+        from ppt_tools.ppt_tables import PPTTable
+        prs = Presentation(template_path)
+        
+        table_configs = [
+            {
+                "name": "tbd_strategy_broad",
+                "df_key": "broad",
+                "sector_col": "sector_level_1"
+            },
+            {
+                "name": "tbd_strategy_granular",
+                "df_key": "granular",
+                "sector_col": "sector_level_2"
+            }
+        ]
+        
+        tables_updated = 0
+        
+        for config in table_configs:
+            table_name = config["name"]
+            df_key = config["df_key"]
+            sector_col = config["sector_col"]
+            
+            if df_key not in strat_agg_combined or strat_agg_combined[df_key] is None:
+                st.warning(f"No data for table '{table_name}'")
+                continue
+            
+            df = strat_agg_combined[df_key].copy()
+            st.write(f"Processing table '{table_name}' with shape {df.shape}")
+            
+            # Find table in presentation
+            table_found = False
+            for slide_idx, slide in enumerate(prs.slides):
+                for shape in slide.shapes:
+                    if shape.name == table_name and hasattr(shape, 'table'):
+                        st.write(f"Found table '{table_name}' on slide {slide_idx + 1}")
+                        
+                        try:
+                            table = shape.table
+                            table_handler = PPTTable(table, prs)
+                            
+                            # Check if we need to add rows
+                            current_rows = len(table.rows)
+                            needed_rows = len(df) + 1  # +1 for header
+                            
+                            if needed_rows > current_rows:
+                                rows_to_add = needed_rows - current_rows
+                                table_handler.update_table_addrow_deep(rows=rows_to_add)
+                                st.write(f"Added {rows_to_add} rows to table")
+                            
+                            # Update table data (assuming first row is header)
+                            for row_idx in range(len(df)):
+                                for col_idx in range(len(df.columns)):
+                                    if row_idx + 1 < len(table.rows) and col_idx < len(table.rows[row_idx + 1].cells):
+                                        cell = table.rows[row_idx + 1].cells[col_idx]  # +1 to skip header
+                                        value = df.iloc[row_idx, col_idx]
+                                        
+                                        # Format values
+                                        col_name = df.columns[col_idx]
+                                        if isinstance(value, (int, float)):
+                                            if col_name in ['called_cap_%']:
+                                                cell.text = f"{value:.0f}%"
+                                            elif col_name in ['DPI', 'TVPI']:
+                                                cell.text = f"{value:.1f}"
+                                            elif col_name in ['nav', 'commitment', 'called_capital', 'distributions']:
+                                                cell.text = f"{value:,.0f}"
+                                            else:
+                                                cell.text = f"{value:.0f}"
+                                        else:
+                                            cell.text = str(value)
+                            
+                            tables_updated += 1
+                            table_found = True
+                            break
+                            
+                        except Exception as e:
+                            st.error(f"Error updating table: {str(e)}")
+                            import traceback
+                            st.error(traceback.format_exc())
+                
+                if table_found:
+                    break
+            
+            if not table_found:
+                st.warning(f"Table '{table_name}' not found in template")
+        
+        # Save presentation
+        prs.save(output_path)
+        st.success(f"Updated {tables_updated} tables")
+        
+        return tables_updated > 0
+        
+    except Exception as e:
+        st.error(f"Error in export_combined_tables_to_ppt: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return False
+
+
+def generate_excel_with_bubble_data(commit_df, dff_pos, strat_agg_dict, granularity, client_name):
+    """
+    Generate Excel file with all data including bubble chart data
+    """
+    output = io.BytesIO()
+    
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        # 1. Commitments data (for stacked area chart)
+        sector_col = 'sector_level_1' if granularity == 'Broad' else 'sector_level_2'
+        stacked_area_data = prepare_stacked_area_data(commit_df, sector_col)
+        stacked_area_data.to_excel(writer, sheet_name='Stacked Area Data', index=False)
+        
+        # 2. Bubble chart data
+        bubble_data = prepare_bubble_chart_data(dff_pos, sector_col)
+        bubble_data.to_excel(writer, sheet_name='Bubble Chart Data', index=False)
+        
+        # 3. Strategy tables
+        if 'broad' in strat_agg_dict and strat_agg_dict['broad'] is not None:
+            strat_agg_dict['broad'].to_excel(writer, sheet_name='Strategy Broad', index=False)
+        
+        if 'granular' in strat_agg_dict and strat_agg_dict['granular'] is not None:
+            strat_agg_dict['granular'].to_excel(writer, sheet_name='Strategy Granular', index=False)
+    
+    output.seek(0)
+    return output
+
+
+def add_ppt_export_section(commit_df, granularity, client_name, strat_agg_dict, dff_pos=None):
+    """
+    Add PowerPoint export section to Streamlit app
+    
+    Args:
+        commit_df: DataFrame with commitment data
+        granularity: 'Broad' or 'Granular'
+        client_name: Client name for file naming
+        strat_agg_dict: Dictionary with 'broad' and 'granular' strategy aggregations
+        dff_pos: Position data filtered by client (for bubble chart)
+    """
+    st.subheader("Export to PowerPoint")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        template_file = st.file_uploader("Upload PowerPoint Template", type=["pptx"], key="ppt_template_uploader")
+    
+    with col2:
+        st.info("Template Requirements:\n"
+                "- Charts: cht_stacked_area_broad, cht_stacked_area_granular\n"
+                "- Tables: tbd_strategy_broad, tbd_strategy_granular")
+    
+    if template_file is not None:
+        # Save uploaded template to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pptx') as tmp_file:
+            tmp_file.write(template_file.getbuffer())
+            temp_template_path = tmp_file.name
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("Export to PowerPoint", key="export_ppt_btn"):
+                try:
+                    output_file = f"{client_name}_private_viz_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx"
+                    
+                    # Export charts
+                    with st.spinner("Exporting charts..."):
+                        chart_success = export_charts_to_ppt(
+                            commit_df=commit_df,
+                            template_path=temp_template_path,
+                            output_path=output_file,
+                            granularity=granularity,
+                            client_name=client_name
+                        )
+                    
+                    # Export tables
+                    with st.spinner("Exporting tables..."):
+                        table_success = export_combined_tables_to_ppt(
+                            strat_agg_combined=strat_agg_dict,
+                            template_path=output_file,  # Use the file with charts already updated
+                            output_path=output_file,
+                            client_name=client_name
+                        )
+                    
+                    if chart_success or table_success:
+                        # Provide download button
+                        with open(output_file, "rb") as file:
+                            st.download_button(
+                                label="📥 Download PowerPoint",
+                                data=file,
+                                file_name=output_file,
+                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                key="download_ppt"
+                            )
+                        st.success("✅ Export completed successfully!")
+                    else:
+                        st.error("Failed to export charts and tables")
+                        
+                except Exception as e:
+                    st.error(f"An error occurred: {str(e)}")
+                    import traceback
+                    st.error(traceback.format_exc())
+                finally:
+                    # Clean up temporary files
+                    try:
+                        os.unlink(temp_template_path)
+                        if 'output_file' in locals() and os.path.exists(output_file):
+                            # Don't delete output file immediately as user might download it
+                            pass
+                    except:
+                        pass
+        
+        with col2:
+            if st.button("Generate Excel with Chart Data", key="export_excel_btn"):
+                if dff_pos is not None:
+                    try:
+                        excel_data = generate_excel_with_bubble_data(
+                            commit_df=commit_df,
+                            dff_pos=dff_pos,
+                            strat_agg_dict=strat_agg_dict,
+                            granularity=granularity,
+                            client_name=client_name
+                        )
+                        
+                        st.download_button(
+                            label="📊 Download Excel Data",
+                            data=excel_data,
+                            file_name=f"{client_name}_chart_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_excel"
+                        )
+                        
+                        st.info("💡 Use this Excel file to create bubble chart in PowerPoint:\n"
+                               "1. Insert a bubble chart in your template\n"
+                               "2. Use 'Commitment Date' as X-axis\n"
+                               "3. Use 'Called Capital %' as Y-axis\n"
+                               "4. Use 'Commitment Size' for bubble size\n"
+                               "5. Use 'Sector' for color grouping\n"
+                               "6. Name the chart 'cht_bubble_chart'")
+                    except Exception as e:
+                        st.error(f"Error generating Excel: {str(e)}")
+                else:
+                    st.warning("Position data (dff_pos) not provided. Cannot generate bubble chart data.")
