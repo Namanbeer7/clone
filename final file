@@ -208,57 +208,83 @@ def update_chart_with_data(chart, df, chart_name=""):
 
 def export_charts_to_ppt(commit_df, template_path, output_path, granularity, client_name):
     """
-    Export charts to PowerPoint template
+    Export charts to PowerPoint template - updates BOTH broad and granular charts
     """
     try:
         prs = Presentation(template_path)
         
-        # Determine which charts to update based on granularity
-        if granularity == 'Broad':
-            chart_name = "cht_stacked_area_broad"
-            sector_col = 'sector_level_1'
-        else:
-            chart_name = "cht_stacked_area_granular"
-            sector_col = 'sector_level_2'
+        # Define both chart configurations
+        chart_configs = [
+            {
+                "name": "cht_stacked_area_broad",
+                "sector_col": "sector_level_1",
+                "display_name": "Broad Stacked Area"
+            },
+            {
+                "name": "cht_stacked_area_granular", 
+                "sector_col": "sector_level_2",
+                "display_name": "Granular Stacked Area"
+            }
+        ]
         
-        st.write(f"Processing chart: {chart_name}")
+        charts_updated = 0
         
-        # Prepare data
-        chart_data = prepare_stacked_area_data(commit_df, sector_col)
-        
-        if chart_data.empty:
-            st.warning(f"No data for {chart_name}")
-            return False
-        
-        st.write(f"Data shape for {chart_name}: {chart_data.shape}")
-        st.dataframe(chart_data.head())
-        
-        # Find and update chart in presentation
-        chart_found = False
-        for slide_idx, slide in enumerate(prs.slides):
-            for shape in slide.shapes:
-                if shape.name == chart_name:
-                    st.write(f"Found chart '{chart_name}' on slide {slide_idx + 1}")
-                    
-                    if hasattr(shape, 'chart') and shape.chart is not None:
-                        if update_chart_with_data(shape.chart, chart_data, chart_name):
-                            chart_found = True
-                            break
-                    else:
-                        st.warning(f"Shape '{chart_name}' is not a valid chart")
+        # Process BOTH charts regardless of granularity setting
+        for config in chart_configs:
+            chart_name = config["name"]
+            sector_col = config["sector_col"]
             
-            if chart_found:
-                break
-        
-        if not chart_found:
-            st.warning(f"Chart '{chart_name}' not found in template")
-            return False
+            st.write(f"Processing chart: {chart_name}")
+            
+            # Check if the required sector column exists in commit_df
+            if sector_col not in commit_df.columns:
+                # Try to use 'sector' column if specific level doesn't exist
+                if 'sector' in commit_df.columns:
+                    st.info(f"Using 'sector' column for {chart_name} as {sector_col} not found")
+                    temp_df = commit_df.copy()
+                    temp_df[sector_col] = temp_df['sector']
+                    chart_data = prepare_stacked_area_data(temp_df, sector_col)
+                else:
+                    st.warning(f"Cannot find {sector_col} or 'sector' column for {chart_name}. Skipping.")
+                    continue
+            else:
+                # Prepare data for this chart
+                chart_data = prepare_stacked_area_data(commit_df, sector_col)
+            
+            if chart_data.empty:
+                st.warning(f"No data for {chart_name}")
+                continue
+            
+            st.write(f"Data shape for {chart_name}: {chart_data.shape}")
+            st.dataframe(chart_data.head())
+            
+            # Find and update chart in presentation
+            chart_found = False
+            for slide_idx, slide in enumerate(prs.slides):
+                for shape in slide.shapes:
+                    if shape.name == chart_name:
+                        st.write(f"Found chart '{chart_name}' on slide {slide_idx + 1}")
+                        
+                        if hasattr(shape, 'chart') and shape.chart is not None:
+                            if update_chart_with_data(shape.chart, chart_data, chart_name):
+                                charts_updated += 1
+                                chart_found = True
+                                st.success(f"✅ Chart '{chart_name}' updated successfully")
+                                break
+                        else:
+                            st.warning(f"Shape '{chart_name}' is not a valid chart")
+                
+                if chart_found:
+                    break
+            
+            if not chart_found:
+                st.warning(f"Chart '{chart_name}' not found in template")
         
         # Save presentation
         prs.save(output_path)
-        st.success(f"Chart '{chart_name}' updated successfully")
+        st.success(f"PowerPoint saved with {charts_updated} charts updated")
         
-        return True
+        return charts_updated > 0
         
     except Exception as e:
         st.error(f"Error in export_charts_to_ppt: {str(e)}")
@@ -269,7 +295,7 @@ def export_charts_to_ppt(commit_df, template_path, output_path, granularity, cli
 
 def export_combined_tables_to_ppt(strat_agg_combined, template_path, output_path, client_name):
     """
-    Export strategy tables to PowerPoint template
+    Export BOTH strategy tables to PowerPoint template regardless of granularity
     """
     try:
         from ppt_tools.ppt_tables import PPTTable
@@ -290,13 +316,14 @@ def export_combined_tables_to_ppt(strat_agg_combined, template_path, output_path
         
         tables_updated = 0
         
+        # Process BOTH tables regardless of granularity setting
         for config in table_configs:
             table_name = config["name"]
             df_key = config["df_key"]
             sector_col = config["sector_col"]
             
             if df_key not in strat_agg_combined or strat_agg_combined[df_key] is None:
-                st.warning(f"No data for table '{table_name}'")
+                st.warning(f"No data for table '{table_name}' - ensure {df_key} data is provided")
                 continue
             
             df = strat_agg_combined[df_key].copy()
@@ -345,10 +372,11 @@ def export_combined_tables_to_ppt(strat_agg_combined, template_path, output_path
                             
                             tables_updated += 1
                             table_found = True
+                            st.success(f"✅ Table '{table_name}' updated successfully")
                             break
                             
                         except Exception as e:
-                            st.error(f"Error updating table: {str(e)}")
+                            st.error(f"Error updating table '{table_name}': {str(e)}")
                             import traceback
                             st.error(traceback.format_exc())
                 
@@ -360,7 +388,7 @@ def export_combined_tables_to_ppt(strat_agg_combined, template_path, output_path
         
         # Save presentation
         prs.save(output_path)
-        st.success(f"Updated {tables_updated} tables")
+        st.success(f"PowerPoint saved with {tables_updated} tables updated")
         
         return tables_updated > 0
         
