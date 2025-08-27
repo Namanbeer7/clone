@@ -27,4 +27,48 @@ def update_chart_with_data(shape, chart, df, chart_name_for_logging=""):
 
 
 
+(1)
+def get_shade_adjusted_color(base_color_rgb, vintage):
+    if vintage is None:
+        print(f"  Warning: vintage is None, returning base color")
+        return base_color_rgb
+
+    # Debug: Check what we're receiving
+    print(f"  get_shade_adjusted_color received: type={type(base_color_rgb)}, vintage={vintage}")
+    
+    if not isinstance(base_color_rgb, RGBColor):
+        print(f"  ERROR: base_color_rgb is not RGBColor, it's {type(base_color_rgb)}")
+        base_color_rgb = PPT_EXTENDED_RGB_COLORS[0]
+    
+    try:
+        rgb_int = base_color_rgb.rgb
+        r = (rgb_int >> 16) & 0xFF
+        g = (rgb_int >> 8) & 0xFF
+        b = rgb_int & 0xFF
+        print(f"  Extracted RGB: r={r}, g={g}, b={b}")
+    except Exception as e:
+        print(f"  ERROR extracting RGB: {e}")
+        return RGBColor(255, 0, 0)
+
+    # Dynamic vintage shading based on the vintage value
+    # Negative vintages (older) should be darker
+    # Vintage 0 or positive should be original color
+    if vintage < 0:
+        # The more negative, the darker (0.3 to 1.0 range)
+        # vintage -10 would give factor ~0.3, vintage -1 would give ~0.9
+        factor = 1.0 + (vintage * 0.07)  # Each negative year reduces brightness by 7%
+        factor = max(0.3, min(1.0, factor))  # Clamp between 0.3 and 1.0
+    else:
+        # Current or future vintages keep original color
+        factor = 1.0
+
+    # Apply the factor to darken the color
+    new_r = int(r * factor)
+    new_g = int(g * factor)
+    new_b = int(b * factor)
+    
+    final_color = RGBColor(new_r, new_g, new_b)
+    print(f"  Shading: vintage={vintage}, factor={factor:.2f}, final RGB=({new_r}, {new_g}, {new_b})")
+    
+    return final_color
 
