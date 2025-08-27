@@ -72,3 +72,75 @@ def get_shade_adjusted_color(base_color_rgb, vintage):
     
     return final_color
 
+
+
+(2)
+# Initialize the RGB color objects properly
+PPT_EXTENDED_RGB_COLORS = []
+for hex_color in Extended_Colors:
+    hex_color = hex_color.lstrip('#')
+    try:
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        rgb_color = RGBColor(r, g, b)
+        PPT_EXTENDED_RGB_COLORS.append(rgb_color)
+        print(f"Created color: R={r}, G={g}, B={b}")
+    except Exception as e:
+        print(f"Error creating color from {hex_color}: {e}")
+        # Add a default color if parsing fails
+        PPT_EXTENDED_RGB_COLORS.append(RGBColor(128, 128, 128))
+
+print(f"Total colors created: {len(PPT_EXTENDED_RGB_COLORS)}")
+
+
+(3)
+def get_shade_adjusted_color(base_color_rgb, vintage):
+    """
+    Adjusts color shade based on vintage.
+    Older (more negative) vintages = darker
+    Newer (closer to 0 or positive) vintages = lighter
+    """
+    if vintage is None:
+        return base_color_rgb
+
+    # Validate input
+    if not isinstance(base_color_rgb, RGBColor):
+        print(f"  ERROR: base_color_rgb is not RGBColor, it's {type(base_color_rgb)}")
+        # Return the first color from palette as fallback
+        return PPT_EXTENDED_RGB_COLORS[0]
+    
+    try:
+        rgb_int = base_color_rgb.rgb
+        r = (rgb_int >> 16) & 0xFF
+        g = (rgb_int >> 8) & 0xFF
+        b = rgb_int & 0xFF
+    except Exception as e:
+        print(f"  ERROR extracting RGB: {e}")
+        # Return original color if we can't process it
+        return base_color_rgb
+
+    # Dynamic vintage shading
+    # Negative vintages (older) should be darker
+    # Vintage 0 or positive should be original color
+    if vintage < 0:
+        # The more negative, the darker
+        # vintage -10 would give factor ~0.3, vintage -1 would give ~0.9
+        factor = 1.0 + (vintage * 0.07)  # Each negative year reduces brightness by 7%
+        factor = max(0.3, min(1.0, factor))  # Clamp between 0.3 and 1.0
+    else:
+        # Current or future vintages keep original color
+        factor = 1.0
+
+    # Apply the factor to darken the color
+    new_r = int(r * factor)
+    new_g = int(g * factor)
+    new_b = int(b * factor)
+    
+    # Ensure values are within valid range
+    new_r = max(0, min(255, new_r))
+    new_g = max(0, min(255, new_g))
+    new_b = max(0, min(255, new_b))
+    
+    return RGBColor(new_r, new_g, new_b)
+
