@@ -1,0 +1,30 @@
+def update_chart_with_data(shape, chart, df, chart_name_for_logging=""):
+    # ... [data update code] ...
+    
+    # 2. Apply Styling
+    if not hasattr(chart, 'series'):
+        return
+
+    # Build asset class color map FIRST, before applying any styling
+    asset_class_color_map = {}
+    color_index = 0
+
+    # First pass: assign colors to unique asset classes
+    for series_obj in chart.series:
+        series_name = series_obj.name
+        asset_class, vintage = extract_asset_class_and_vintage(series_name)
+        if asset_class not in asset_class_color_map and series_name != "Target NAV (Line)":
+            asset_class_color_map[asset_class] = PPT_EXTENDED_RGB_COLORS[color_index % len(PPT_EXTENDED_RGB_COLORS)]
+            color_index += 1
+
+    # Debug output
+    print(f"Chart: {chart_name_for_logging}")
+    print(f"Asset class color map: {list(asset_class_color_map.keys())}")
+
+    # Second pass: apply colors with vintage shading
+    for i, series_obj in enumerate(chart.series):
+        # ... styling code ...
+
+
+
+
