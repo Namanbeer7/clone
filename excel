@@ -1,0 +1,158 @@
+from io import BytesIO
+import xlsxwriter
+
+def create_client_level_excel(client_data_dict):
+    """
+    Create Excel file with client-level chart data
+    """
+    output = BytesIO()
+    
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        # Write each dataset to a separate sheet
+        for sheet_name, df in client_data_dict.items():
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+        
+        # Get workbook and add formats
+        workbook = writer.book
+        header_format = workbook.add_format({
+            'bold': True,
+            'bg_color': '#D7E4BD',
+            'border': 1
+        })
+        
+        # Format headers for each sheet
+        for sheet_name in client_data_dict.keys():
+            worksheet = writer.sheets[sheet_name]
+            worksheet.set_column('A:Z', 15)  # Set column width
+    
+    output.seek(0)
+    return output
+
+
+def create_fund_level_excel(fund_data_dict, fund_name):
+    """
+    Create Excel file with fund-level chart data
+    """
+    output = BytesIO()
+    
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        # Write each dataset to a separate sheet
+        for sheet_name, df in fund_data_dict.items():
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+        
+        # Get workbook and add formats
+        workbook = writer.book
+        header_format = workbook.add_format({
+            'bold': True,
+            'bg_color': '#D7E4BD',
+            'border': 1
+        })
+        
+        # Add a summary sheet with fund name
+        summary_df = pd.DataFrame({'Fund Name': [fund_name], 'Export Date': [datetime.now().strftime('%Y-%m-%d')]})
+        summary_df.to_excel(writer, sheet_name='Summary', index=False)
+        
+        # Format headers for each sheet
+        for sheet_name in fund_data_dict.keys():
+            if sheet_name in writer.sheets:
+                worksheet = writer.sheets[sheet_name]
+                worksheet.set_column('A:Z', 15)  # Set column width
+    
+    output.seek(0)
+    return output
+
+
+# Added this list initialization before the loop
+commitment_over_time_data = []
+
+# Inside the existing for sss in strategy_list loop:
+# Store data for Excel export
+        for i, year in enumerate(year_list):
+            commitment_over_time_data.append({
+                'Year': year,
+                'Strategy': sss,
+                'Called': called_sum[i],
+                'Uncalled': uncalled_sum[i],
+                'Total Commitment': tot_commit_sum[i]
+            })
+
+
+# Prepare client-level data for Excel export
+        client_excel_data = {
+            'Commitments Over Time': pd.DataFrame(commitment_over_time_data),
+            'Commitment & Funding': dff_pos[['fund_name', 'commit_date', 'commitment', 'called_cap_x', 'strategy', sector_level]],
+            'Cashflows & NAV': pd.DataFrame({
+                'Date': date_list,
+                'Distributions': dists,
+                'Capital Calls': capcalls,
+                'NAV': nav_hist,
+                'Cumulative Cashflows': cumulativecash
+            }),
+            'TVPI Composition': pd.DataFrame({
+                'Date': date_list,
+                'DPI': dpi_hist,
+                'RVPI': rvpi_hist,
+                'TVPI': tvpi_hist
+            }),
+            'IRR History': pd.DataFrame({
+                'Date': date_list,
+                'IRR': irrlist
+            }),
+            'Funds Table': df_table,
+            'Strategy Summary': strat_agg_df
+        }
+        
+        # Add Client-Level Download Button
+        st.markdown("### Download Client-Level Data")
+        excel_file = create_client_level_excel(client_excel_data)
+        st.download_button(
+            label="📥 Download Client-Level Excel Report",
+            data=excel_file,
+            file_name=f"{client_name}_portfolio_analysis_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Download all client-level chart data in Excel format"
+        )
+
+
+
+# Prepare fund-level data for Excel export
+            fund_excel_data = {
+                'Fund Summary': pd.DataFrame({
+                    'Fund Name': [fund_name],
+                    'Commitment': [fund_data.loc[0, 'commitment'] if not fund_data.empty else 0],
+                    'Called Capital': [fund_data.loc[0, 'called_capital'] if not fund_data.empty else 0],
+                    'NAV': [fund_data.loc[0, 'nav'] if not fund_data.empty else 0],
+                    'Distributions': [fund_data.loc[0, 'distributions'] if not fund_data.empty else 0],
+                    'DPI': [fund_data.loc[0, 'DPI'] if not fund_data.empty else 0],
+                    'TVPI': [fund_data.loc[0, 'TVPI'] if not fund_data.empty else 0],
+                    'IRR': [fund_data.loc[0, 'IRR'] if not fund_data.empty else 0]
+                }),
+                'Cashflows & NAV': pd.DataFrame({
+                    'Date': date_list,
+                    'Distributions': dists,
+                    'Capital Calls': capcalls,
+                    'NAV': nav_hist,
+                    'Cumulative Cashflows': cumulativecash
+                }),
+                'TVPI Composition': pd.DataFrame({
+                    'Date': date_list,
+                    'DPI': dpi_hist,
+                    'RVPI': rvpi_hist,
+                    'TVPI': tvpi_hist
+                }),
+                'IRR History': pd.DataFrame({
+                    'Date': date_list,
+                    'IRR': irrlist
+                })
+            }
+
+            # Add Fund-Level Download Button
+            st.markdown("### Download Fund-Level Data")
+            fund_excel_file = create_fund_level_excel(fund_excel_data, fund_name)
+            st.download_button(
+                label=f"📥 Download {fund_name} Excel Report",
+                data=fund_excel_file,
+                file_name=f"{fund_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help=f"Download fund-level chart data for {fund_name} in Excel format"
+            )
