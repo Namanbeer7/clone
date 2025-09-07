@@ -142,12 +142,53 @@ def update_stacked_column_chart(chart, df, chart_name=""):
 
 (d)
 def export_all_charts_to_ppt(data_dict, template_path, output_path, granularity, client_name):
-    """Export all charts to PowerPoint template including the 5 new charts"""
+    """
+    Export all charts to PowerPoint template including the 5 new charts
+    
+    Args:
+        data_dict: Dictionary containing all necessary data:
+            - commit_df: Commitment data for stacked area
+            - dff_pos: Position data for bubble charts
+            - date_list: List of dates for time series
+            - dists: Distributions array
+            - capcalls: Capital calls array
+            - nav_hist: NAV history list
+            - cumulativecash: Cumulative cashflows array
+            - dpi_hist: DPI history array
+            - rvpi_hist: RVPI history array
+            - irrlist: IRR history list
+    """
     try:
         prs = Presentation(template_path)
         charts_updated = 0
         
-        # [Existing stacked area chart code...]
+        # 1. Update stacked area charts (existing functionality)
+        if 'commit_df' in data_dict:
+            chart_configs = [
+                {"name": "cht_stacked_area_broad", "sector_col": "sector_level_1"},
+                {"name": "cht_stacked_area_granular", "sector_col": "sector_level_2"}
+            ]
+            
+            for config in chart_configs:
+                chart_name = config["name"]
+                sector_col = config["sector_col"]
+                
+                if sector_col not in data_dict['commit_df'].columns:
+                    if 'sector' in data_dict['commit_df'].columns:
+                        temp_df = data_dict['commit_df'].copy()
+                        temp_df[sector_col] = temp_df['sector']
+                        chart_data = prepare_stacked_area_data(temp_df, sector_col)
+                    else:
+                        continue
+                else:
+                    chart_data = prepare_stacked_area_data(data_dict['commit_df'], sector_col)
+                
+                for slide in prs.slides:
+                    for shape in slide.shapes:
+                        if shape.name == chart_name and hasattr(shape, 'chart'):
+                            if update_chart_with_data(shape.chart, chart_data, chart_name):
+                                charts_updated += 1
+                                break
         
         # 2. Update bubble charts (commitment and funding)
         if 'dff_pos' in data_dict:
@@ -213,6 +254,7 @@ def export_all_charts_to_ppt(data_dict, template_path, output_path, granularity,
                             charts_updated += 1
                             break
         
+        # Save presentation
         prs.save(output_path)
         st.success(f"PowerPoint saved with {charts_updated} charts updated")
         
