@@ -282,6 +282,5 @@ def generate_comprehensive_excel(data_dict, strat_agg_dict, granularity, client_
         if 'granular' in strat_agg_dict and strat_agg_dict['granular'] is not None:
             strat_agg_dict['granular'].to_excel(writer, sheet_name='Strategy Granular', index=False)
     
-    
     output.seek(0)
     return output
