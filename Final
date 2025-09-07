@@ -326,3 +326,180 @@ def generate_comprehensive_excel(data_dict, strat_agg_dict, granularity, client_
     
     output.seek(0)
     return output
+
+
+
+
+
+
+
+
+(a)
+import tempfile
+import os
+
+# Import PowerPoint export functions
+from private_viz_ppt_export import (
+    export_all_charts_to_ppt,
+    export_combined_tables_to_ppt,
+    generate_comprehensive_excel
+)
+
+(b)
+# Create both broad and granular strategy aggregations for PowerPoint export
+strat_agg_broad = dff_pos.groupby('sector_level_1')[['nav', 'commitment', 'called_capital', 'distributions']].sum().reset_index()
+strat_agg_broad['called_cap_x'] = strat_agg_broad['called_capital'] / strat_agg_broad['commitment']
+strat_agg_broad['DPI'] = strat_agg_broad['distributions'] / strat_agg_broad['called_capital']
+strat_agg_broad['TVPI'] = (strat_agg_broad['distributions'] + strat_agg_broad['nav']) / strat_agg_broad['called_capital']
+
+strat_agg_granular = dff_pos.groupby('sector_level_2')[['nav', 'commitment', 'called_capital', 'distributions']].sum().reset_index()
+strat_agg_granular['called_cap_x'] = strat_agg_granular['called_capital'] / strat_agg_granular['commitment']
+strat_agg_granular['DPI'] = strat_agg_granular['distributions'] / strat_agg_granular['called_capital']
+strat_agg_granular['TVPI'] = (strat_agg_granular['distributions'] + strat_agg_granular['nav']) / strat_agg_granular['called_capital']
+
+(d)
+# Changed from:
+tab1, tab2 = st.tabs(["Asset Allocation", "Fund Insight"])
+
+# To:
+tab1, tab2, tab3 = st.tabs(["Asset Allocation", "Fund Insight", "PowerPoint Export"])
+
+
+
+with tab3:
+    st.subheader("📊 Export to PowerPoint")
+    
+    st.info("""
+    **PowerPoint Template Requirements:**
+    
+    The template must contain the following named chart objects:
+    - **Commitment Charts**: `cht_commitment_broad`, `cht_commitment_granular` (Bubble Charts)
+    - **Stacked Area Charts**: `cht_stacked_area_broad`, `cht_stacked_area_granular`
+    - **IRR History**: `cht_irr` (Line Chart)
+    - **Cashflows & NAV**: `cht_history` (Combo Chart)
+    - **TVPI Composition**: `cht_tvpi` (Stacked Column Chart)
+    - **Strategy Tables**: `tbd_strategy_broad`, `tbd_strategy_granular`
+    """)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        template_file = st.file_uploader(
+            "Upload PowerPoint Template", 
+            type=["pptx"], 
+            key="ppt_template_uploader",
+            help="Upload a PowerPoint template with pre-configured chart objects"
+        )
+    
+    with col2:
+        st.markdown("### Quick Links")
+        st.markdown("- [Download Sample Template](link-to-template)")
+        st.markdown("- [Template Setup Guide](link-to-guide)")
+    
+    if template_file is not None:
+        # Prepare data dictionary for PowerPoint export
+        data_dict = {
+            'commit_df': commit_df,
+            'dff_pos': dff_pos,
+            'date_list': date_list,
+            'dists': dists,
+            'capcalls': capcalls,
+            'nav_hist': nav_hist,
+            'cumulativecash': cumulativecash,
+            'dpi_hist': dpi_hist,
+            'rvpi_hist': rvpi_hist,
+            'irrlist': irrlist
+        }
+        
+        strat_agg_dict = {
+            'broad': strat_agg_broad,
+            'granular': strat_agg_granular
+        }
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🚀 Export All Charts to PowerPoint", key="export_ppt_btn", type="primary"):
+                try:
+                    # Save uploaded template to temporary file
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.pptx') as tmp_file:
+                        tmp_file.write(template_file.getbuffer())
+                        temp_template_path = tmp_file.name
+                    
+                    output_file = f"{client_name}_private_markets_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx"
+                    
+                    with st.spinner("Exporting charts to PowerPoint..."):
+                        # Export all charts
+                        chart_success = export_all_charts_to_ppt(
+                            data_dict=data_dict,
+                            template_path=temp_template_path,
+                            output_path=output_file,
+                            granularity=granularity,
+                            client_name=client_name
+                        )
+                    
+                    if chart_success:
+                        # Export tables using the file with charts already updated
+                        with st.spinner("Exporting tables to PowerPoint..."):
+                            table_success = export_combined_tables_to_ppt(
+                                strat_agg_combined=strat_agg_dict,
+                                template_path=output_file,
+                                output_path=output_file,
+                                client_name=client_name
+                            )
+                        
+                        # Provide download button
+                        with open(output_file, "rb") as file:
+                            st.success("✅ PowerPoint export completed successfully!")
+                            st.download_button(
+                                label="📥 Download PowerPoint Presentation",
+                                data=file,
+                                file_name=output_file,
+                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                key="download_ppt"
+                            )
+                    else:
+                        st.error("Failed to export charts. Please check the template and try again.")
+                        
+                except Exception as e:
+                    st.error(f"An error occurred during export: {str(e)}")
+                    st.error("Please ensure your template has all required chart objects with correct names.")
+                finally:
+                    # Clean up temporary files
+                    try:
+                        if 'temp_template_path' in locals():
+                            os.unlink(temp_template_path)
+                        if 'output_file' in locals() and os.path.exists(output_file):
+                            pass  # Keep file for download
+                    except:
+                        pass
+        
+        with col2:
+            if st.button("📊 Generate Excel with All Data", key="export_excel_btn"):
+                try:
+                    excel_data = generate_comprehensive_excel(
+                        data_dict=data_dict,
+                        strat_agg_dict=strat_agg_dict,
+                        granularity=granularity,
+                        client_name=client_name
+                    )
+                    
+                    st.download_button(
+                        label="📥 Download Excel Data File",
+                        data=excel_data,
+                        file_name=f"{client_name}_chart_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="download_excel_comprehensive"
+                    )
+                    
+                    st.success("Excel file generated successfully!")
+                    
+                except Exception as e:
+                    st.error(f"Error generating Excel: {str(e)}")
+        
+        with col3:
+            st.markdown("### Export Options")
+            include_fund_data = st.checkbox("Include fund-level data", value=False)
+            
+            if include_fund_data and fund_name:
+                st.info(f"Fund-level data for '{fund_name}' will be included in a separate sheet")
