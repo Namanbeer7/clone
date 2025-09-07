@@ -227,11 +227,28 @@ def export_all_charts_to_ppt(data_dict, template_path, output_path, granularity,
 
 (e)
 def generate_comprehensive_excel(data_dict, strat_agg_dict, granularity, client_name):
-    """Generate comprehensive Excel file with all chart data"""
+    """
+    Generate comprehensive Excel file with all chart data
+    """
     output = io.BytesIO()
     
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # [Multiple sheets creation code...]
+        # 1. Stacked area data
+        if 'commit_df' in data_dict:
+            sector_col = 'sector_level_1' if granularity == 'Broad' else 'sector_level_2'
+            if sector_col in data_dict['commit_df'].columns or 'sector' in data_dict['commit_df'].columns:
+                temp_df = data_dict['commit_df'].copy()
+                if sector_col not in temp_df.columns and 'sector' in temp_df.columns:
+                    temp_df[sector_col] = temp_df['sector']
+                stacked_area_data = prepare_stacked_area_data(temp_df, sector_col)
+                stacked_area_data.to_excel(writer, sheet_name='Stacked Area Data', index=False)
+        
+        # 2. Bubble chart data
+        if 'dff_pos' in data_dict:
+            for level, sector_col in [('Broad', 'sector_level_1'), ('Granular', 'sector_level_2')]:
+                if sector_col in data_dict['dff_pos'].columns:
+                    bubble_data = prepare_bubble_chart_data(data_dict['dff_pos'], sector_col)
+                    bubble_data.to_excel(writer, sheet_name=f'Bubble Chart {level}', index=False)
         
         # 3. IRR History
         if 'date_list' in data_dict and 'irrlist' in data_dict:
@@ -258,7 +275,13 @@ def generate_comprehensive_excel(data_dict, strat_agg_dict, granularity, client_
             )
             tvpi_data.to_excel(writer, sheet_name='TVPI Composition', index=False)
         
-        # [Strategy tables code...]
+        # 6. Strategy tables
+        if 'broad' in strat_agg_dict and strat_agg_dict['broad'] is not None:
+            strat_agg_dict['broad'].to_excel(writer, sheet_name='Strategy Broad', index=False)
+        
+        if 'granular' in strat_agg_dict and strat_agg_dict['granular'] is not None:
+            strat_agg_dict['granular'].to_excel(writer, sheet_name='Strategy Granular', index=False)
+    
     
     output.seek(0)
     return output
