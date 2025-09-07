@@ -1,0 +1,264 @@
+(a) 
+# Define specific colors for charts
+COLOR_GREEN = RGBColor(0, 139, 19)  # Distributions
+COLOR_GRAY = RGBColor(166, 166, 166)  # Capital Calls
+COLOR_ORANGE = RGBColor(255, 71, 19)  # NAV/DPI
+COLOR_BLUE = RGBColor(31, 119, 180)  # Cumulative Cashflows
+COLOR_YELLOW = RGBColor(244, 178, 35)  # RVPI
+
+(b)
+def prepare_bubble_chart_data(dff_pos, sector_level):
+    """Prepare bubble chart data for PowerPoint"""
+    bubble_data = dff_pos[['fund_name', 'commit_date', 'called_cap_x', 'commitment', sector_level]].copy()
+    bubble_data.columns = ['Fund Name', 'Commitment Date', 'Called Capital %', 'Commitment Size', 'Sector']
+    bubble_data['Commitment Date'] = pd.to_datetime(bubble_data['Commitment Date'])
+    return bubble_data
+
+def prepare_irr_history_data(date_list, irr_list):
+    """Prepare IRR history data for line chart"""
+    df = pd.DataFrame({'Date': date_list, 'IRR': irr_list})
+    return df
+
+def prepare_cashflows_nav_data(date_list, dists, capcalls, nav_hist, cumulativecash):
+    """Prepare cashflows and NAV history data for combo chart"""
+    df = pd.DataFrame({
+        'Date': date_list,
+        'Distributions': dists,
+        'Capital Calls': capcalls,
+        'NAV': nav_hist,
+        'Cumulative Cashflows': cumulativecash
+    })
+    return df
+
+def prepare_tvpi_composition_data(date_list, dpi_hist, rvpi_hist):
+    """Prepare TVPI composition data for stacked column chart"""
+    df = pd.DataFrame({'Date': date_list, 'DPI': dpi_hist, 'RVPI': rvpi_hist})
+    return df
+
+(c)
+def update_bubble_chart(chart, bubble_data, chart_name=""):
+    """Update bubble chart with commitment and funding data"""
+    try:
+        chart_data = BubbleChartData()
+        sectors = bubble_data['Sector'].unique()
+        
+        for i, sector in enumerate(sectors):
+            sector_data = bubble_data[bubble_data['Sector'] == sector]
+            series = chart_data.add_series(sector)
+            
+            for _, row in sector_data.iterrows():
+                excel_date = (row['Commitment Date'] - pd.Timestamp('1899-12-30')).days
+                series.add_data_point(
+                    excel_date,
+                    row['Called Capital %'],
+                    row['Commitment Size']
+                )
+        
+        chart.replace_data(chart_data)
+        
+        for i, series in enumerate(chart.series):
+            if hasattr(series.format, 'fill'):
+                series.format.fill.solid()
+                series.format.fill.fore_color.rgb = PPT_EXTENDED_RGB_COLORS[i % len(PPT_EXTENDED_RGB_COLORS)]
+        
+        return True
+    except Exception as e:
+        st.error(f"Error updating bubble chart '{chart_name}': {str(e)}")
+        return False
+
+def update_line_chart(chart, df, chart_name=""):
+    """Update line chart for IRR history"""
+    try:
+        chart_data = CategoryChartData()
+        chart_data.categories = [d.strftime('%Y-%m') if hasattr(d, 'strftime') else str(d) 
+                                 for d in df['Date']]
+        chart_data.add_series('IRR', df['IRR'].tolist())
+        chart.replace_data(chart_data)
+        
+        if hasattr(chart.series[0].format, 'line'):
+            chart.series[0].format.line.color.rgb = RGBColor(44, 160, 44)
+            chart.series[0].format.line.width = Pt(2.25)
+        
+        return True
+    except Exception as e:
+        st.error(f"Error updating line chart '{chart_name}': {str(e)}")
+        return False
+
+def update_combo_chart(chart, df, chart_name=""):
+    """Update combo chart for Cashflows & NAV History"""
+    try:
+        chart_data = CategoryChartData()
+        chart_data.categories = [d.strftime('%Y-%m') if hasattr(d, 'strftime') else str(d) 
+                                 for d in df['Date']]
+        
+        chart_data.add_series('Distributions', df['Distributions'].tolist())
+        chart_data.add_series('Capital Calls', df['Capital Calls'].tolist())
+        chart_data.add_series('NAV', df['NAV'].tolist())
+        chart_data.add_series('Cumulative Cashflows', df['Cumulative Cashflows'].tolist())
+        
+        chart.replace_data(chart_data)
+        
+        if len(chart.series) >= 4:
+            chart.series[0].format.fill.solid()
+            chart.series[0].format.fill.fore_color.rgb = COLOR_GREEN
+            chart.series[1].format.fill.solid()
+            chart.series[1].format.fill.fore_color.rgb = COLOR_GRAY
+            
+            if hasattr(chart.series[2].format, 'line'):
+                chart.series[2].format.line.color.rgb = COLOR_ORANGE
+                chart.series[2].format.line.width = Pt(2.25)
+            
+            if hasattr(chart.series[3].format, 'line'):
+                chart.series[3].format.line.color.rgb = COLOR_BLUE
+                chart.series[3].format.line.width = Pt(2.25)
+        
+        return True
+    except Exception as e:
+        st.error(f"Error updating combo chart '{chart_name}': {str(e)}")
+        return False
+
+def update_stacked_column_chart(chart, df, chart_name=""):
+    """Update stacked column chart for TVPI composition"""
+    try:
+        chart_data = CategoryChartData()
+        chart_data.categories = [d.strftime('%Y-%m') if hasattr(d, 'strftime') else str(d) 
+                                 for d in df['Date']]
+        
+        chart_data.add_series('DPI', df['DPI'].tolist())
+        chart_data.add_series('RVPI', df['RVPI'].tolist())
+        
+        chart.replace_data(chart_data)
+        
+        if len(chart.series) >= 2:
+            chart.series[0].format.fill.solid()
+            chart.series[0].format.fill.fore_color.rgb = COLOR_ORANGE
+            chart.series[1].format.fill.solid()
+            chart.series[1].format.fill.fore_color.rgb = COLOR_YELLOW
+        
+        return True
+    except Exception as e:
+        st.error(f"Error updating stacked column chart '{chart_name}': {str(e)}")
+        return False
+
+(d)
+def export_all_charts_to_ppt(data_dict, template_path, output_path, granularity, client_name):
+    """Export all charts to PowerPoint template including the 5 new charts"""
+    try:
+        prs = Presentation(template_path)
+        charts_updated = 0
+        
+        # [Existing stacked area chart code...]
+        
+        # 2. Update bubble charts (commitment and funding)
+        if 'dff_pos' in data_dict:
+            bubble_configs = [
+                {"name": "cht_commitment_broad", "sector_col": "sector_level_1"},
+                {"name": "cht_commitment_granular", "sector_col": "sector_level_2"}
+            ]
+            
+            for config in bubble_configs:
+                chart_name = config["name"]
+                sector_col = config["sector_col"]
+                
+                if sector_col in data_dict['dff_pos'].columns:
+                    bubble_data = prepare_bubble_chart_data(data_dict['dff_pos'], sector_col)
+                    
+                    for slide in prs.slides:
+                        for shape in slide.shapes:
+                            if shape.name == chart_name and hasattr(shape, 'chart'):
+                                if update_bubble_chart(shape.chart, bubble_data, chart_name):
+                                    charts_updated += 1
+                                    break
+        
+        # 3. Update IRR history chart
+        if 'date_list' in data_dict and 'irrlist' in data_dict:
+            irr_data = prepare_irr_history_data(data_dict['date_list'], data_dict['irrlist'])
+            
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if shape.name == "cht_irr" and hasattr(shape, 'chart'):
+                        if update_line_chart(shape.chart, irr_data, "cht_irr"):
+                            charts_updated += 1
+                            break
+        
+        # 4. Update Cashflows & NAV History chart
+        if all(k in data_dict for k in ['date_list', 'dists', 'capcalls', 'nav_hist', 'cumulativecash']):
+            cashflows_data = prepare_cashflows_nav_data(
+                data_dict['date_list'],
+                data_dict['dists'],
+                data_dict['capcalls'],
+                data_dict['nav_hist'],
+                data_dict['cumulativecash']
+            )
+            
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if shape.name == "cht_history" and hasattr(shape, 'chart'):
+                        if update_combo_chart(shape.chart, cashflows_data, "cht_history"):
+                            charts_updated += 1
+                            break
+        
+        # 5. Update TVPI Composition chart
+        if all(k in data_dict for k in ['date_list', 'dpi_hist', 'rvpi_hist']):
+            tvpi_data = prepare_tvpi_composition_data(
+                data_dict['date_list'],
+                data_dict['dpi_hist'],
+                data_dict['rvpi_hist']
+            )
+            
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if shape.name == "cht_tvpi" and hasattr(shape, 'chart'):
+                        if update_stacked_column_chart(shape.chart, tvpi_data, "cht_tvpi"):
+                            charts_updated += 1
+                            break
+        
+        prs.save(output_path)
+        st.success(f"PowerPoint saved with {charts_updated} charts updated")
+        
+        return charts_updated > 0
+        
+    except Exception as e:
+        st.error(f"Error in export_all_charts_to_ppt: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return False
+
+
+(e)
+def generate_comprehensive_excel(data_dict, strat_agg_dict, granularity, client_name):
+    """Generate comprehensive Excel file with all chart data"""
+    output = io.BytesIO()
+    
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        # [Multiple sheets creation code...]
+        
+        # 3. IRR History
+        if 'date_list' in data_dict and 'irrlist' in data_dict:
+            irr_data = prepare_irr_history_data(data_dict['date_list'], data_dict['irrlist'])
+            irr_data.to_excel(writer, sheet_name='IRR History', index=False)
+        
+        # 4. Cashflows & NAV
+        if all(k in data_dict for k in ['date_list', 'dists', 'capcalls', 'nav_hist', 'cumulativecash']):
+            cashflows_data = prepare_cashflows_nav_data(
+                data_dict['date_list'],
+                data_dict['dists'],
+                data_dict['capcalls'],
+                data_dict['nav_hist'],
+                data_dict['cumulativecash']
+            )
+            cashflows_data.to_excel(writer, sheet_name='Cashflows NAV History', index=False)
+        
+        # 5. TVPI Composition
+        if all(k in data_dict for k in ['date_list', 'dpi_hist', 'rvpi_hist']):
+            tvpi_data = prepare_tvpi_composition_data(
+                data_dict['date_list'],
+                data_dict['dpi_hist'],
+                data_dict['rvpi_hist']
+            )
+            tvpi_data.to_excel(writer, sheet_name='TVPI Composition', index=False)
+        
+        # [Strategy tables code...]
+    
+    output.seek(0)
+    return output
